@@ -58,25 +58,23 @@ type Worker struct {
 	sync.Mutex
 
 	id         Id
+	chopChan   chan int
 	msgChan    <-chan Message
 	deadChan   chan<- Id
 	commitChan chan<- Commit
 
-	config       *Config
-	ws           *websocket.Conn
-	state        string
-	replayQueue  []*Message
-	commitOffset int
+	config      *Config
+	ws          *websocket.Conn
+	state       string
+	replayQueue []*Message
 
 	lastCloseTime  time.Time
 	lastCommitTime time.Time
 
 	stateChan chan State
 
-	stopDeadChecker     chan bool
-	stopSend            chan bool
-	stopChopReplayQueue chan bool
-	stopReplay          bool
+	stopDeadChecker chan bool
+	stopReplay      bool
 }
 
 func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan chan<- Commit) IWorker {
@@ -90,12 +88,11 @@ func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan cha
 			closeTimeout:  5 * time.Minute,
 			commitTimeout: 30 * time.Minute,
 		},
-		stopSend:            make(chan bool),
-		stopReplay:          false,
-		stopChopReplayQueue: make(chan bool),
-		stopDeadChecker:     make(chan bool),
-		state:               CLOSED,
-		stateChan:           make(chan State),
+		stopReplay:      false,
+		stopDeadChecker: make(chan bool),
+		chopChan:        make(chan int),
+		state:           CLOSED,
+		stateChan:       make(chan State),
 	}
 
 	go w.stateSwitcher()
@@ -175,32 +172,35 @@ func (me *Worker) stateSwitcher() {
 	}
 }
 
+func chop(queue []*Message, offset int) []*Message {
+	for i, msg := range queue {
+		if offset < msg.Offset {
+			return queue[i:]
+		}
+	}
+	return nil
+}
+
 func (me *Worker) onNormal() {
 	log.Printf("[wsworker: %s] onNormal", me.id)
-
-	go me.chopReplayQueue()
-
-loop:
+	var offset = -1
 	for {
 		select {
-		case msg := <-me.msgChan:
-			me.replayQueue = append(me.replayQueue, &msg)
-
-			err := me.wsSend(msg.Payload)
-			if err != nil {
-				// use goroutine to fix blocking: SwitchState (wait onNormal - onNormal wait SwitchState)
-				go func() {
-					me.stopSend <- true
-					me.SwitchState(CLOSED)
-				}()
-
+		case offset = <-me.chopChan:
+		case <-time.After(1 * time.Second):
+			if offset == -1 {
 				continue
 			}
+			me.commitChan <- Commit{Id: me.id, Offset: offset}
+			me.replayQueue = chop(me.replayQueue, offset)
+			offset = -1
 
-			log.Printf("[wsworker: %s] sent: %s", me.id, string(msg.Payload))
-
-		case <-me.stopSend:
-			break loop
+		case msg := <-me.msgChan:
+			me.replayQueue = append(me.replayQueue, &msg)
+			if err := me.wsSend(msg.Payload); err != nil {
+				go me.SwitchState(CLOSED)
+				return
+			}
 		}
 	}
 }
@@ -237,10 +237,6 @@ func (me *Worker) onClosed() {
 
 	me.stopReplay = true
 
-	if me.state == NORMAL {
-		me.stopSend <- true
-		me.stopChopReplayQueue <- true
-	}
 }
 
 func (me *Worker) onDead() {
@@ -248,11 +244,6 @@ func (me *Worker) onDead() {
 
 	if me.ws != nil {
 		me.ws.Close()
-	}
-
-	if me.state == NORMAL {
-		me.stopSend <- true
-		me.stopChopReplayQueue <- true
 	}
 
 	// use goroutine to fix blocking: deadChecker (wait onDead - onDead wait deadChecker)
@@ -300,43 +291,6 @@ loop:
 	}
 }
 
-// remove committed messages from replay queue
-func (me *Worker) chopReplayQueue() {
-	log.Printf("[wsworker: %s] chopReplayQueue", me.id)
-
-	ticker := time.NewTicker(1 * time.Second)
-loop:
-	for {
-		select {
-		case <-ticker.C:
-			log.Printf("[wsworker: %s] chopReplayQueue choping", me.id)
-
-			if me.state != NORMAL {
-				return
-			}
-
-			go func() {
-				me.commitChan <- Commit{
-					Id:     me.id,
-					Offset: me.commitOffset,
-				}
-			}()
-
-			newReplayQueue := []*Message{}
-
-			for _, msg := range me.replayQueue {
-				if msg.Offset > me.commitOffset {
-					newReplayQueue = append(newReplayQueue, msg)
-				}
-			}
-
-			me.replayQueue = newReplayQueue
-		case <-me.stopChopReplayQueue:
-			break loop
-		}
-	}
-}
-
 func (me *Worker) TotalInQueue() int {
 	return len(me.replayQueue)
 }
@@ -373,19 +327,19 @@ func (me *Worker) wsSend(payload []byte) error {
 
 func (me *Worker) wsOnMessage(ws *websocket.Conn) {
 	log.Printf("[wsworker: %s] wsOnMessage", me.id)
-loop:
+	currentoffset := 0
 	for {
 		_, p, err := ws.ReadMessage()
 		if err != nil {
 			log.Printf("[wsworker: %s] read message error: %s", me.id, err)
 			me.SwitchState(CLOSED)
-			break loop
+			break
 		}
 
 		offset := strToInt(string(p))
-
-		if offset > me.commitOffset {
-			me.commitOffset = offset
+		if offset > currentoffset {
+			me.chopChan <- offset
+			currentoffset = offset
 		}
 
 		me.lastCommitTime = time.Now()
@@ -396,7 +350,6 @@ func (me *Worker) debug() {
 	log.Println("-------------------------------------------------")
 	log.Printf("[wsworker: %s] state: %s\n", me.id, me.state)
 	log.Printf("[wsworker: %s] replayQueue: %v\n", me.id, me.replayQueue)
-	log.Printf("[wsworker: %s] commitOffset: %d\n", me.id, me.commitOffset)
 	log.Printf("[wsworker: %s] lastCloseTime: %s\n", me.id, me.lastCloseTime)
 	log.Printf("[wsworker: %s] lastCommitTime: %s\n", me.id, me.lastCommitTime)
 }
