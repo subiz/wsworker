@@ -31,7 +31,6 @@ type IWorker interface {
 type Id = string
 
 type Message struct {
-	Id      Id
 	Offset  int
 	Payload []byte
 }
