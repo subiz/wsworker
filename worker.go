@@ -1,6 +1,7 @@
 package wsworker
 
 import (
+	"bitbucket.org/subiz/fsm"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
@@ -9,10 +10,14 @@ import (
 )
 
 const (
-	CLOSED = "closed"
-	DEAD   = "dead"
-	NORMAL = "normal"
-	REPLAY = "replay"
+	CLOSED  = "closed"
+	DEAD    = "dead"
+	NORMAL  = "normal"
+	REPLAY  = "replay"
+	ECLOSED = "e_closed"
+	EDEAD   = "e_dead"
+	ENORMAL = "e_normal"
+	EREPLAY = "e_replay"
 )
 
 var upgrader = websocket.Upgrader{
@@ -25,7 +30,6 @@ type IWorker interface {
 	TotalInQueue() int
 	GetState() string
 	SetConfig(config Config)
-	SwitchState(string)
 }
 
 type Id = string
@@ -45,11 +49,6 @@ type Config struct {
 	commitTimeout time.Duration
 }
 
-type State struct {
-	state string
-	done  chan bool
-}
-
 type Worker struct {
 	id          Id
 	chopChan    chan int
@@ -60,8 +59,8 @@ type Worker struct {
 	ws          *websocket.Conn
 	state       string
 	replayQueue []*Message
-	stateChan   chan State
 	newConnChan chan bool
+	machine     fsm.FSM
 }
 
 func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan chan<- Commit) IWorker {
@@ -77,11 +76,17 @@ func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan cha
 		},
 		chopChan:    make(chan int),
 		state:       CLOSED,
-		stateChan:   make(chan State),
 		newConnChan: make(chan bool),
+		machine:     fsm.New(id),
 	}
 
-	go w.stateSwitcher()
+	w.machine.Map([]fsm.State{
+		{ECLOSED, CLOSED, w.OnClosed},
+		{EDEAD, DEAD, w.OnDead},
+		{ENORMAL, NORMAL, w.OnNormal},
+		{EREPLAY, REPLAY, w.OnReplay},
+	})
+	w.machine.Run(ECLOSED, nil)
 	return w
 }
 
@@ -97,56 +102,6 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
 	return nil
 }
 
-func (me *Worker) SwitchState(state string) {
-	log.Printf("[wsworker: %s] SwitchState: %s", me.id, state)
-
-	done := make(chan bool)
-	me.stateChan <- State{state: state, done: done}
-	<-done
-}
-
-func (me *Worker) stateSwitcher() {
-	log.Printf("[wsworker: %s] stateSwitcher", me.id)
-
-	for s := range me.stateChan {
-		state := s.state
-		log.Printf("[wsworker: %s] %s -> %s", me.id, me.state, state)
-
-		if state == me.state {
-			s.done <- true
-			continue
-		}
-
-		switch state {
-		case NORMAL:
-			if me.state == REPLAY {
-				me.state = NORMAL
-				go me.onNormal()
-			}
-
-		case REPLAY:
-			if me.state == CLOSED {
-				me.state = REPLAY
-				me.onReplay()
-			}
-
-		case CLOSED:
-			if me.state == NORMAL || me.state == REPLAY {
-				me.state = CLOSED
-				me.onClosed()
-			}
-
-		case DEAD:
-			if me.state == NORMAL || me.state == CLOSED {
-				me.state = DEAD
-				me.onDead()
-			}
-		}
-
-		s.done <- true
-	}
-}
-
 func chop(queue []*Message, offset int) []*Message {
 	for i, msg := range queue {
 		if offset < msg.Offset {
@@ -156,7 +111,7 @@ func chop(queue []*Message, offset int) []*Message {
 	return nil
 }
 
-func (me *Worker) onNormal() {
+func (me *Worker) OnNormal(_ string, _ interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onNormal", me.id)
 	committed, offset := time.Now(), -1
 	ws, currentoffset, closechan := me.ws, 0, make(chan bool)
@@ -179,17 +134,14 @@ func (me *Worker) onNormal() {
 	for {
 		select {
 		case <-me.newConnChan:
-			go me.SwitchState(NORMAL)
-			return
+			return ENORMAL, nil
 		case <-closechan:
-			go me.SwitchState(CLOSED)
-			return
+			return ECLOSED, nil
 		case offset = <-me.chopChan:
 		case <-time.After(1 * time.Second):
 			// dead if haven't committed for too long
 			if me.config.commitTimeout < time.Since(committed) {
-				go me.SwitchState(DEAD)
-				return
+				return EDEAD, nil
 			}
 
 			// check for commit offset
@@ -205,44 +157,42 @@ func (me *Worker) onNormal() {
 		case msg := <-me.msgChan:
 			me.replayQueue = append(me.replayQueue, &msg)
 			if err := me.wsSend(ws, msg.Payload); err != nil {
-				go me.SwitchState(CLOSED)
-				return
+				log.Printf("[wsworker: %s] on send error %v", me.id, err)
+				return ECLOSED, nil
 			}
 		}
 	}
 }
 
-func (me *Worker) onReplay() {
+func (me *Worker) OnReplay(_ string, _ interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onReplay", me.id)
 	log.Printf("[wsworker: %s] total message in queue: %d", me.id, len(me.replayQueue))
 	ws := me.ws
 	for _, m := range me.replayQueue {
 		if err := me.wsSend(ws, m.Payload); err != nil {
-			go me.SwitchState(CLOSED)
-			return
+			log.Printf("[wsworker: %s] on send error %v", me.id, err)
+			return ECLOSED, nil
 		}
 
 		log.Printf("[wsworker: %s] replayed: %s", me.id, string(m.Payload))
 	}
-	me.SwitchState(NORMAL)
+	return ENORMAL, nil
 }
 
-func (me *Worker) onClosed() {
+func (me *Worker) OnClosed(_ string, _ interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onClosed", me.id)
 
 	for {
 		select {
 		case <-time.After(me.config.closeTimeout):
-			go me.SwitchState(DEAD)
-			return
+			return DEAD, nil
 		case <-me.newConnChan:
-			go me.SwitchState(REPLAY)
-			return
+			return REPLAY, nil
 		}
 	}
 }
 
-func (me *Worker) onDead() {
+func (me *Worker) OnDead(_ string, _ interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onDead", me.id)
 
 	// release resource
@@ -253,6 +203,8 @@ func (me *Worker) onDead() {
 	me.replayQueue = nil
 
 	me.deadChan <- me.id
+	me.machine.Stop()
+	return "", nil
 }
 
 func (me *Worker) TotalInQueue() int {
