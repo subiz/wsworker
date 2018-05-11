@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
 	"github.com/gorilla/websocket"
 )
 
@@ -242,18 +241,14 @@ func (me *Worker) onClosed() {
 func (me *Worker) onDead() {
 	log.Printf("[wsworker: %s] onDead", me.id)
 
+	// release resource
 	if me.ws != nil {
 		me.ws.Close()
 	}
+	me.ws = nil
+	me.replayQueue = nil
 
-	// use goroutine to fix blocking: deadChecker (wait onDead - onDead wait deadChecker)
-	go func() {
-		me.stopDeadChecker <- true
-	}()
-
-	go func() {
-		me.deadChan <- me.id
-	}()
+	me.deadChan <- me.id
 }
 
 // no websocket connection for 5 minutes
