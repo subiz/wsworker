@@ -75,10 +75,10 @@ func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan cha
 			closeTimeout:  5 * time.Minute,
 			commitTimeout: 30 * time.Minute,
 		},
-		chopChan:        make(chan int),
-		state:           CLOSED,
-		stateChan:       make(chan State),
-		newConnChan:     make(chan bool),
+		chopChan:    make(chan int),
+		state:       CLOSED,
+		stateChan:   make(chan State),
+		newConnChan: make(chan bool),
 	}
 
 	go w.stateSwitcher()
@@ -178,7 +178,7 @@ func (me *Worker) onNormal() {
 
 	for {
 		select {
-		case <- me.newConnChan:
+		case <-me.newConnChan:
 			go me.SwitchState(NORMAL)
 			return
 		case <-closechan:
@@ -253,12 +253,6 @@ func (me *Worker) onDead() {
 	me.replayQueue = nil
 
 	me.deadChan <- me.id
-}
-
-// no websocket connection for 5 minutes
-// OR dont see "commit" for a long time (30 minutes)
-func (me *Worker) deadChecker() {
-
 }
 
 func (me *Worker) TotalInQueue() int {
