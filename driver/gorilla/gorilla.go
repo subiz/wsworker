@@ -12,7 +12,6 @@ type Ws struct {
 	writer  io.WriteCloser
 	recv    chan []byte
 	recverr chan error
-	pingerr chan error
 	stopped bool
 }
 
@@ -21,13 +20,6 @@ func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = conn.SetReadDeadline(time.Now().Add(PongWait)); err != nil {
-		return nil, err
-	}
-
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(PongWait))
-	})
 
 	writer, err := conn.NextWriter(websocket.TextMessage)
 	if err != nil {
@@ -35,7 +27,6 @@ func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 	}
 
 	ws := &Ws{
-		pingerr: make(chan error, 2),
 		recv:    make(chan []byte, 2),
 		recverr: make(chan error, 2),
 		stopped: false,
@@ -43,7 +34,6 @@ func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 		conn:    conn,
 	}
 
-	go ws.pingLoop()
 	go ws.readLoop()
 	return ws, nil
 }
@@ -54,10 +44,6 @@ var (
 
 	// WriteWait is sending message timeout
 	WriteWait = 21 * time.Second
-
-	// PongWait is the time allowed to read the next pong message from the peer
-	// PingPeriod is the period to send ping
-	PongWait, PingPeriod = 26 * time.Second, PongWait * 9 / 10
 
 	upgrader = websocket.Upgrader{
 		ReadBufferSize: MaxMessageSize,
@@ -81,24 +67,18 @@ func (ws *Ws) RecvErr() <-chan error {
 	return ws.recverr
 }
 
-func (ws *Ws) PingErr() <-chan error {
-	return ws.pingerr
-}
-
 func (ws *Ws) Send(data []byte) error {
 	_, err := ws.writer.Write(data)
 	return err
 }
 
-func (ws *Ws) pingLoop() {
-	for ; !ws.stopped; time.Sleep(PingPeriod) {
-		ws.conn.SetWriteDeadline(time.Now().Add(WriteWait))
-		if err := ws.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-			ws.pingerr <- err
-			ws.Close()
-			return
-		}
+func (ws *Ws) Ping() error {
+	ws.conn.SetWriteDeadline(time.Now().Add(WriteWait))
+	if err := ws.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+		ws.Close()
+		return err
 	}
+	return nil
 }
 
 func (ws *Ws) readLoop() {

@@ -1,8 +1,8 @@
 package wsworker
 
 import (
-	"bitbucket.org/subiz/wsworker/driver/gorilla"
 	"bitbucket.org/subiz/fsm"
+	"bitbucket.org/subiz/wsworker/driver/gorilla"
 	"log"
 	"net/http"
 	"strconv"
@@ -22,9 +22,9 @@ const (
 
 type Ws interface {
 	Close() error
-	Recv() <- chan []byte
-	RecvErr() <- chan error
-	PingErr() <- chan error
+	Recv() <-chan []byte
+	RecvErr() <-chan error
+	Ping() error
 	Send(data []byte) error
 }
 
@@ -48,6 +48,7 @@ type Commit struct {
 }
 
 type Config struct {
+	pingTimeout   time.Duration
 	closeTimeout  time.Duration
 	commitTimeout time.Duration
 }
@@ -71,6 +72,7 @@ func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan cha
 		commitChan:  commitChan,
 		replayQueue: []*Message{},
 		config: &Config{
+			pingTimeout:   30 * time.Minute,
 			closeTimeout:  5 * time.Minute,
 			commitTimeout: 30 * time.Minute,
 		},
@@ -117,35 +119,24 @@ func chop(queue []*Message, offset int) ([]*Message, bool) {
 	return nil, true
 }
 
-func tryRead(c chan bool) bool {
-	select{
-	case c := <- c:
-		return c
-	default:
-	}
-	return false
-}
-
 func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onNormal", me.id)
-	ws, committed, offset := wsi.(Ws), time.Now(), -1
-	recv, recverr, pingerr := ws.Recv(), ws.RecvErr(), ws.PingErr()
-	defer ws.Close()
+	ws, committed, pinged, offset := wsi.(Ws), time.Now(), time.Now(), -1
+	recv, recverr := ws.Recv(), ws.RecvErr()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
-		case err := <-pingerr:
-			log.Printf("[wsworker: %s] ping error: %s", me.id, err)
-			return ECLOSED, ws
-		case err := <-recverr:
-			log.Printf("[wsworker: %s] recv error: %s", me.id, err)
-			return ECLOSED, ws
-		case p := <-recv: // inconmming message from ws
-			offset = strToInt(string(p));
-		case newws := <-me.newConnChan:
-			return ENORMAL, newws
-		case <-time.After(1 * time.Second):
+		case <-ticker.C:
+			if me.config.pingTimeout < time.Since(pinged) {
+				if err := ws.Ping(); err != nil {
+					return ECLOSED, ws
+				}
+				pinged = time.Now()
+			}
+
 			// dead if haven't committed for too long
-			if me.config.commitTimeout < time.Since(committed) {
+			if me.config.commitTimeout < time.Since(committed) && 0 < len(me.replayQueue) {
 				return EDEAD, ws
 			}
 
@@ -160,6 +151,14 @@ func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
 			}
 
 			me.replayQueue, offset, committed = newqueue, -1, time.Now()
+		case err := <-recverr:
+			log.Printf("[wsworker: %s] recv error: %s", me.id, err)
+			return ECLOSED, ws
+		case p := <-recv: // inconmming message from ws
+			offset = strToInt(string(p))
+		case newws := <-me.newConnChan:
+			ws.Close()
+			return ENORMAL, newws
 		case msg := <-me.msgChan:
 			me.replayQueue = append(me.replayQueue, &msg)
 			if err := ws.Send(msg.Payload); err != nil {
@@ -179,7 +178,6 @@ func (me *Worker) OnReplay(_ string, wsi interface{}) (string, interface{}) {
 			log.Printf("[wsworker: %s] on send error %v", me.id, err)
 			return ECLOSED, ws
 		}
-
 		log.Printf("[wsworker: %s] replayed: %s", me.id, string(m.Payload))
 	}
 	return ENORMAL, ws
@@ -192,8 +190,9 @@ func (me *Worker) OnClosed(_ string, wsi interface{}) (string, interface{}) {
 		select {
 		case <-time.After(me.config.closeTimeout):
 			return EDEAD, ws
-		case ws := <-me.newConnChan:
-			return EREPLAY, ws
+		case newws := <-me.newConnChan:
+			ws.Close()
+			return EREPLAY, newws
 		}
 	}
 }
