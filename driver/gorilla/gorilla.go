@@ -9,7 +9,6 @@ import (
 
 type Ws struct {
 	conn    *websocket.Conn
-	writer  io.WriteCloser
 	recv    chan []byte
 	recverr chan error
 	stopped bool
@@ -21,16 +20,10 @@ func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 		return nil, err
 	}
 
-	writer, err := conn.NextWriter(websocket.TextMessage)
-	if err != nil {
-		return nil, err
-	}
-
 	ws := &Ws{
 		recv:    make(chan []byte, 2),
 		recverr: make(chan error, 2),
 		stopped: false,
-		writer:  writer,
 		conn:    conn,
 	}
 
@@ -68,8 +61,14 @@ func (ws *Ws) RecvErr() <-chan error {
 }
 
 func (ws *Ws) Send(data []byte) error {
-	_, err := ws.writer.Write(data)
-	return err
+	writer, err := ws.conn.NextWriter(websocket.TextMessage)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(data); err != nil {
+		return err
+	}
+	return writer.Close()
 }
 
 func (ws *Ws) Ping() error {
