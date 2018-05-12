@@ -1,8 +1,8 @@
 package wsworker
 
 import (
+	"bitbucket.org/subiz/wsworker/driver/gorilla"
 	"bitbucket.org/subiz/fsm"
-	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"strconv"
@@ -20,9 +20,12 @@ const (
 	EREPLAY = "e_replay"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+type Ws interface {
+	Close() error
+	Recv() <- chan []byte
+	RecvErr() <- chan error
+	PingErr() <- chan error
+	Send(data []byte) error
 }
 
 type IWorker interface {
@@ -51,13 +54,12 @@ type Config struct {
 
 type Worker struct {
 	id          Id
-	chopChan    chan int
 	msgChan     <-chan Message
 	deadChan    chan<- Id
 	commitChan  chan<- Commit
 	config      *Config
 	replayQueue []*Message
-	newConnChan chan *websocket.Conn
+	newConnChan chan Ws
 	machine     fsm.FSM
 }
 
@@ -72,8 +74,7 @@ func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan cha
 			closeTimeout:  5 * time.Minute,
 			commitTimeout: 30 * time.Minute,
 		},
-		chopChan:    make(chan int),
-		newConnChan: make(chan *websocket.Conn),
+		newConnChan: make(chan Ws),
 		machine:     fsm.New(id),
 	}
 
@@ -90,7 +91,7 @@ func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan cha
 func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
 	log.Printf("[wsworker: %s] SetConnection", me.id)
 
-	ws, err := upgrader.Upgrade(w, r, nil)
+	ws, err := gorilla.NewWs(w, r, nil)
 	if err != nil {
 		return err
 	}
@@ -98,13 +99,22 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
 	return nil
 }
 
-func chop(queue []*Message, offset int) []*Message {
+// chop queue, return new queue and the first offset
+func chop(queue []*Message, offset int) ([]*Message, bool) {
+	if len(queue) == 0 {
+		return queue, false
+	}
+
+	if offset < queue[0].Offset {
+		return queue, false
+	}
+
 	for i, msg := range queue {
 		if offset < msg.Offset {
-			return queue[i:]
+			return queue[i:], true
 		}
 	}
-	return nil
+	return nil, true
 }
 
 func tryRead(c chan bool) bool {
@@ -118,33 +128,21 @@ func tryRead(c chan bool) bool {
 
 func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onNormal", me.id)
-	committed, offset := time.Now(), -1
-	ws := wsi.(*websocket.Conn)
-	currentoffset, closechan := 0, make(chan bool, 2)
-	go func() {
-		for {
-			_, p, err := ws.ReadMessage()
-			if err != nil {
-				log.Printf("[wsworker: %s] read message error: %s", me.id, err)
-				closechan <- true
-				return
-			}
-			offset := strToInt(string(p))
-			if offset > currentoffset {
-				me.chopChan <- offset
-				currentoffset = offset
-			}
-		}
-	}()
-
+	ws, committed, offset := wsi.(Ws), time.Now(), -1
+	recv, recverr, pingerr := ws.Recv(), ws.RecvErr(), ws.PingErr()
 	defer ws.Close()
 	for {
 		select {
+		case err := <-pingerr:
+			log.Printf("[wsworker: %s] ping error: %s", me.id, err)
+			return ECLOSED, ws
+		case err := <-recverr:
+			log.Printf("[wsworker: %s] recv error: %s", me.id, err)
+			return ECLOSED, ws
+		case p := <-recv: // inconmming message from ws
+			offset = strToInt(string(p));
 		case newws := <-me.newConnChan:
 			return ENORMAL, newws
-		case <-closechan:
-			return ECLOSED, ws
-		case offset = <-me.chopChan:
 		case <-time.After(1 * time.Second):
 			// dead if haven't committed for too long
 			if me.config.commitTimeout < time.Since(committed) {
@@ -152,18 +150,19 @@ func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
 			}
 
 			// check for commit offset
-			if offset == -1 {
+			if offset < 0 {
 				continue
 			}
 
-			me.commitChan <- Commit{Id: me.id, Offset: offset}
-			me.replayQueue = chop(me.replayQueue, offset)
-			offset = -1
-			committed = time.Now()
+			newqueue, ok := chop(me.replayQueue, offset)
+			if ok {
+				me.commitChan <- Commit{Id: me.id, Offset: offset}
+			}
 
+			me.replayQueue, offset, committed = newqueue, -1, time.Now()
 		case msg := <-me.msgChan:
 			me.replayQueue = append(me.replayQueue, &msg)
-			if err := me.wsSend(ws, msg.Payload); err != nil {
+			if err := ws.Send(msg.Payload); err != nil {
 				log.Printf("[wsworker: %s] on send error %v", me.id, err)
 				return ECLOSED, ws
 			}
@@ -174,9 +173,9 @@ func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
 func (me *Worker) OnReplay(_ string, wsi interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onReplay", me.id)
 	log.Printf("[wsworker: %s] total message in queue: %d", me.id, len(me.replayQueue))
-	ws := wsi.(*websocket.Conn)
+	ws := wsi.(Ws)
 	for _, m := range me.replayQueue {
-		if err := me.wsSend(ws, m.Payload); err != nil {
+		if err := ws.Send(m.Payload); err != nil {
 			log.Printf("[wsworker: %s] on send error %v", me.id, err)
 			return ECLOSED, ws
 		}
@@ -188,7 +187,7 @@ func (me *Worker) OnReplay(_ string, wsi interface{}) (string, interface{}) {
 
 func (me *Worker) OnClosed(_ string, wsi interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onClosed", me.id)
-	ws := wsi.(*websocket.Conn)
+	ws := wsi.(Ws)
 	for {
 		select {
 		case <-time.After(me.config.closeTimeout):
@@ -202,7 +201,7 @@ func (me *Worker) OnClosed(_ string, wsi interface{}) (string, interface{}) {
 func (me *Worker) OnDead(_ string, wsi interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onDead", me.id)
 	// release resource
-	ws := wsi.(*websocket.Conn)
+	ws := wsi.(Ws)
 	ws.Close()
 
 	me.replayQueue = nil
@@ -221,10 +220,6 @@ func (me *Worker) GetState() string {
 
 func (me *Worker) SetConfig(config Config) {
 	me.config = &config
-}
-
-func (me *Worker) wsSend(ws *websocket.Conn, payload []byte) error {
-	return ws.WriteMessage(websocket.TextMessage, payload)
 }
 
 func (me *Worker) debug() {
