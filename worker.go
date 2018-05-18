@@ -21,6 +21,7 @@ const (
 )
 
 type Ws interface {
+	GetId() string
 	Close() error
 	Recv() <-chan []byte
 	RecvErr() <-chan error
@@ -38,6 +39,7 @@ type IWorker interface {
 type Id = string
 
 type Message struct {
+	Id string
 	Offset  int
 	Payload []byte
 }
@@ -86,7 +88,7 @@ func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan cha
 		{ENORMAL, NORMAL, w.OnNormal},
 		{EREPLAY, REPLAY, w.OnReplay},
 	})
-	w.machine.Run(ECLOSED, nil)
+	go w.machine.Run(ECLOSED, nil)
 	return w
 }
 
@@ -122,10 +124,13 @@ func chop(queue []*Message, offset int) ([]*Message, bool) {
 func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onNormal", me.id)
 	ws, committed, pinged, offset := wsi.(Ws), time.Now(), time.Now(), -1
-	recv, recverr := ws.Recv(), ws.RecvErr()
+	 recv, recverr :=  ws.Recv(), ws.RecvErr()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
+
+
+
 		select {
 		case <-ticker.C:
 			if me.config.pingTimeout < time.Since(pinged) {
@@ -135,7 +140,7 @@ func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
 				pinged = time.Now()
 			}
 
-			// dead if haven't committed for too long
+			// die if haven't committed for too long
 			if me.config.commitTimeout < time.Since(committed) && 0 < len(me.replayQueue) {
 				return EDEAD, ws
 			}
@@ -186,14 +191,12 @@ func (me *Worker) OnReplay(_ string, wsi interface{}) (string, interface{}) {
 func (me *Worker) OnClosed(_ string, wsi interface{}) (string, interface{}) {
 	log.Printf("[wsworker: %s] onClosed", me.id)
 	ws := wsi.(Ws)
-	for {
-		select {
-		case <-time.After(me.config.closeTimeout):
-			return EDEAD, ws
-		case newws := <-me.newConnChan:
-			ws.Close()
-			return EREPLAY, newws
-		}
+	select {
+	case <-time.After(me.config.closeTimeout):
+		return EDEAD, ws
+	case newws := <-me.newConnChan:
+		ws.Close()
+		return EREPLAY, newws
 	}
 }
 
