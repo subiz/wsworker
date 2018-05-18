@@ -2,7 +2,6 @@ package gorilla
 
 import (
 	"github.com/gorilla/websocket"
-	"io"
 	"net/http"
 	"time"
 )
@@ -52,8 +51,21 @@ func (ws *Ws) Close() error {
 	return ws.conn.Close()
 }
 
-func (ws *Ws) Recv() <-chan []byte {
-	return ws.recv
+func (ws *Ws) Recv(d time.Duration) ([]byte, error) {
+	println("read now", d)
+	if err := ws.conn.SetReadDeadline(time.Now().Add(d)); err != nil {
+		return nil, err
+	}
+	println("start read")
+	_, p, err := ws.conn.ReadMessage()
+	println("done read")
+	if err != nil {
+		ws.Close()
+		return nil, err
+	}
+
+
+	return p, nil
 }
 
 func (ws *Ws) RecvErr() <-chan error {
@@ -82,12 +94,6 @@ func (ws *Ws) Ping() error {
 
 func (ws *Ws) readLoop() {
 	for !ws.stopped {
-		_, p, err := ws.conn.ReadMessage()
-		if err != nil {
-			ws.recverr <- err
-			ws.Close()
-			return
-		}
-		ws.recv <- p
+
 	}
 }
