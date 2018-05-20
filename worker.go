@@ -1,236 +1,302 @@
 package wsworker
 
 import (
-	"bitbucket.org/subiz/fsm"
 	"bitbucket.org/subiz/wsworker/driver/gorilla"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
 const (
-	CLOSED  = "closed"
-	DEAD    = "dead"
-	NORMAL  = "normal"
-	REPLAY  = "replay"
-	ECLOSED = "e_closed"
-	EDEAD   = "e_dead"
-	ENORMAL = "e_normal"
-	EREPLAY = "e_replay"
+	CLOSED = "closed"
+	DEAD   = "dead"
+	NORMAL = "normal"
+	REPLAY = "replay"
 )
 
 type Ws interface {
-	GetId() string
 	Close() error
-	Recv() <-chan []byte
-	RecvErr() <-chan error
+	Recv() ([]byte, error)
 	Ping() error
 	Send(data []byte) error
 }
 
 type IWorker interface {
 	SetConnection(req *http.Request, res http.ResponseWriter) error
-	TotalInQueue() int
-	GetState() string
-	SetConfig(config Config)
+	PingCheck(time.Duration)
+	DeadCheck(time.Duration)
+	CommitCheck()
+	OutdateCheck(time.Duration)
+	Send(msg *Message)
 }
 
-type Id = string
-
 type Message struct {
-	Id string
-	Offset  int
+	Id      string
+	Offset  int32
 	Payload []byte
 }
 
 type Commit struct {
-	Id     Id
-	Offset int
-}
-
-type Config struct {
-	pingTimeout   time.Duration
-	closeTimeout  time.Duration
-	commitTimeout time.Duration
+	Id     string
+	Offset int32
 }
 
 type Worker struct {
-	id          Id
-	msgChan     <-chan Message
-	deadChan    chan<- Id
+	*sync.Mutex
+	id          string
+	offset      int32
+	dirty       bool      // have message that have not been committed
+	pinged      time.Time // last pinged time
+	closed      time.Time // last closed time
+	committed   time.Time // last committed time
+	ws          Ws
+	state       string
+	deadChan    chan<- string
 	commitChan  chan<- Commit
-	config      *Config
 	replayQueue []*Message
-	newConnChan chan Ws
-	machine     fsm.FSM
 }
 
-func NewWorker(id Id, msgChan <-chan Message, deadChan chan<- Id, commitChan chan<- Commit) IWorker {
-	w := &Worker{
+func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) IWorker {
+	return &Worker{
 		id:          id,
-		msgChan:     msgChan,
+		pinged:      time.Now(),
+		committed:   time.Now(),
 		deadChan:    deadChan,
 		commitChan:  commitChan,
 		replayQueue: []*Message{},
-		config: &Config{
-			pingTimeout:   30 * time.Minute,
-			closeTimeout:  5 * time.Minute,
-			commitTimeout: 30 * time.Minute,
-		},
-		newConnChan: make(chan Ws),
-		machine:     fsm.New(id),
 	}
+}
 
-	w.machine.Map([]fsm.State{
-		{ECLOSED, CLOSED, w.OnClosed},
-		{EDEAD, DEAD, w.OnDead},
-		{ENORMAL, NORMAL, w.OnNormal},
-		{EREPLAY, REPLAY, w.OnReplay},
-	})
-	go w.machine.Run(ECLOSED, nil)
-	return w
+var DEADERR = errors.New("dead")
+var REPLAYINGERR = errors.New("replaying")
+
+func (w *Worker) recvLoop() {
+	for {
+		w.Lock()
+		if w.state != NORMAL {
+			w.Unlock()
+			return
+		}
+		w.onNormalRecv(w.ws.Recv())
+		w.Unlock()
+	}
 }
 
 func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
-	log.Printf("[wsworker: %s] SetConnection", me.id)
+	me.Lock()
+	defer me.Unlock()
 
 	ws, err := gorilla.NewWs(w, r, nil)
 	if err != nil {
 		return err
 	}
-	me.newConnChan <- ws
+	switch me.state {
+	case CLOSED:
+		me.onClosedNewConn(ws)
+	case NORMAL:
+		me.onNormalNewConn(ws)
+	case REPLAY:
+		return REPLAYINGERR
+	case DEAD:
+		return DEADERR
+	}
 	return nil
 }
 
 // chop queue, return new queue and the first offset
-func chop(queue []*Message, offset int) ([]*Message, bool) {
-	if len(queue) == 0 {
-		return queue, false
-	}
-
-	if offset < queue[0].Offset {
-		return queue, false
-	}
-
+func chop(queue []*Message, offset int32) []*Message {
 	for i, msg := range queue {
-		if offset < msg.Offset {
-			return queue[i:], true
+		if offset == msg.Offset {
+			return queue[i:]
 		}
 	}
-	return nil, true
+	return queue
 }
 
-func (me *Worker) OnNormal(_ string, wsi interface{}) (string, interface{}) {
-	log.Printf("[wsworker: %s] onNormal", me.id)
-	ws, committed, pinged, offset := wsi.(Ws), time.Now(), time.Now(), -1
-	 recv, recverr :=  ws.Recv(), ws.RecvErr()
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-	for {
+func (w *Worker) toNormal() {
+	w.state = NORMAL
+	go w.recvLoop()
+}
 
+func (w *Worker) onNormalPingCheck(deadline time.Duration) {
+	if time.Since(w.pinged) < deadline {
+		return
+	}
+	if err := w.ws.Ping(); err != nil {
+		w.toClosed()
+		return
+	}
+	w.pinged = time.Now()
+}
 
+func (w *Worker) onNormalOutdateCheck(deadline time.Duration) {
+	if deadline < time.Since(w.committed) && 0 < len(w.replayQueue) {
+		w.toDead()
+		return
+	}
+}
 
-		select {
-		case <-ticker.C:
-			if me.config.pingTimeout < time.Since(pinged) {
-				if err := ws.Ping(); err != nil {
-					return ECLOSED, ws
-				}
-				pinged = time.Now()
-			}
+func (w *Worker) onNormalCommitCheck() {
+	if !w.dirty {
+		return
+	}
 
-			// die if haven't committed for too long
-			if me.config.commitTimeout < time.Since(committed) && 0 < len(me.replayQueue) {
-				return EDEAD, ws
-			}
+	newqueue := chop(w.replayQueue, w.offset)
+	if len(newqueue) != len(w.replayQueue) {
+		w.commitChan <- Commit{Id: w.id, Offset: w.offset}
+	}
+	w.dirty, w.replayQueue, w.committed = false, newqueue, time.Now()
+}
 
-			// check for commit offset
-			if offset < 0 {
-				continue
-			}
+func (w *Worker) onNormalMsg(msg *Message) {
+	w.replayQueue = append(w.replayQueue, msg)
+	if err := w.ws.Send(msg.Payload); err != nil {
+		log.Printf("[wsworker: %s] on send error %v", w.id, err)
+		w.toClosed()
+		return
+	}
+}
 
-			newqueue, ok := chop(me.replayQueue, offset)
-			if ok {
-				me.commitChan <- Commit{Id: me.id, Offset: offset}
-			}
+func (w *Worker) onNormalRecv(p []byte, err error) {
+	if err != nil {
+		w.toClosed()
+		return
+	}
+	w.offset, w.dirty = strToInt(string(p)), true
+}
 
-			me.replayQueue, offset, committed = newqueue, -1, time.Now()
-		case err := <-recverr:
-			log.Printf("[wsworker: %s] recv error: %s", me.id, err)
-			return ECLOSED, ws
-		case p := <-recv: // inconmming message from ws
-			offset = strToInt(string(p))
-		case newws := <-me.newConnChan:
-			ws.Close()
-			return ENORMAL, newws
-		case msg := <-me.msgChan:
-			me.replayQueue = append(me.replayQueue, &msg)
-			if err := ws.Send(msg.Payload); err != nil {
-				log.Printf("[wsworker: %s] on send error %v", me.id, err)
-				return ECLOSED, ws
-			}
+func (w *Worker) onReplayMsg(msg *Message) {
+	w.replayQueue = append(w.replayQueue, msg)
+}
+
+func (w *Worker) toReplay() {
+	w.state = REPLAY
+
+	for _, m := range w.replayQueue {
+		if err := w.ws.Send(m.Payload); err != nil {
+			log.Printf("[wsworker: %s] on send error %v", w.id, err)
+			w.toClosed()
+			return
 		}
+		w.Unlock()
+		w.Lock()
 	}
+	w.toNormal()
 }
 
-func (me *Worker) OnReplay(_ string, wsi interface{}) (string, interface{}) {
-	log.Printf("[wsworker: %s] onReplay", me.id)
-	log.Printf("[wsworker: %s] total message in queue: %d", me.id, len(me.replayQueue))
-	ws := wsi.(Ws)
-	for _, m := range me.replayQueue {
-		if err := ws.Send(m.Payload); err != nil {
-			log.Printf("[wsworker: %s] on send error %v", me.id, err)
-			return ECLOSED, ws
-		}
-		log.Printf("[wsworker: %s] replayed: %s", me.id, string(m.Payload))
-	}
-	return ENORMAL, ws
+func (w *Worker) toClosed() {
+	w.state = CLOSED
+	w.closed = time.Now()
+	w.ws.Close()
 }
 
-func (me *Worker) OnClosed(_ string, wsi interface{}) (string, interface{}) {
-	log.Printf("[wsworker: %s] onClosed", me.id)
-	ws := wsi.(Ws)
-	select {
-	case <-time.After(me.config.closeTimeout):
-		return EDEAD, ws
-	case newws := <-me.newConnChan:
-		ws.Close()
-		return EREPLAY, newws
-	}
+func (w *Worker) onNormalNewConn(newws Ws) {
+	w.ws.Close()
+	w.ws = newws
+	w.toReplay()
 }
 
-func (me *Worker) OnDead(_ string, wsi interface{}) (string, interface{}) {
-	log.Printf("[wsworker: %s] onDead", me.id)
+func (w *Worker) onClosedNewConn(newws Ws) {
+	w.ws.Close()
+	w.ws = newws
+	w.toReplay()
+}
+
+func (w *Worker) onClosedMsg(msg *Message) {
+	w.replayQueue = append(w.replayQueue, msg)
+}
+
+func (w *Worker) onClosedDeadCheck(deadline time.Duration) {
+	if time.Since(w.closed) < deadline {
+		return
+	}
+	w.toDead()
+}
+
+// state = closed
+func (w *Worker) DeadCheck(deadline time.Duration) {
+	w.Lock()
+	defer w.Unlock()
+
+	if w.state != CLOSED {
+		return
+	}
+
+	w.onClosedDeadCheck(deadline)
+}
+
+func (w *Worker) toDead() {
+	log.Printf("[wsworker: %s] onDead", w.id)
 	// release resource
-	ws := wsi.(Ws)
-	ws.Close()
-
-	me.replayQueue = nil
-	me.deadChan <- me.id
-	me.machine.Stop()
-	return "", nil
+	w.state = DEAD
+	w.ws.Close()
+	w.replayQueue = nil
+	w.deadChan <- w.id
 }
 
-func (me *Worker) TotalInQueue() int {
-	return len(me.replayQueue)
-}
-
-func (me *Worker) GetState() string {
-	return me.machine.GetState()
-}
-
-func (me *Worker) SetConfig(config Config) {
-	me.config = &config
-}
-
-func (me *Worker) debug() {
-	log.Println("-------------------------------------------------")
-	log.Printf("[wsworker: %s] state: %s\n", me.id, me.machine.GetState())
-	log.Printf("[wsworker: %s] replayQueue: %v\n", me.id, me.replayQueue)
-}
-
-func strToInt(str string) int {
+func strToInt(str string) int32 {
 	i, _ := strconv.Atoi(str)
-	return i
+	return int32(i)
+}
+
+func (w *Worker) PingCheck(deadline time.Duration) {
+	w.Lock()
+	defer w.Unlock()
+
+	if w.state != NORMAL {
+		return
+	}
+
+	w.onNormalPingCheck(deadline)
+}
+
+func (w *Worker) DieCheck(deadline time.Duration) {
+	w.Lock()
+	defer w.Unlock()
+
+	if w.state != CLOSED {
+		return
+	}
+
+	w.onClosedDeadCheck(deadline)
+}
+
+func (w *Worker) CommitCheck() {
+	w.Lock()
+	defer w.Unlock()
+
+	if w.state != NORMAL {
+		return
+	}
+
+	w.onNormalCommitCheck()
+}
+
+func (w *Worker) OutdateCheck(deadline time.Duration) {
+	w.Lock()
+	defer w.Unlock()
+
+	if w.state != NORMAL {
+		return
+	}
+
+	w.onNormalOutdateCheck(deadline)
+}
+
+func (w *Worker) Send(msg *Message) {
+	w.Lock()
+	defer w.Unlock()
+	switch w.state {
+	case NORMAL:
+		w.onNormalMsg(msg)
+	case CLOSED:
+		w.onClosedMsg(msg)
+	case REPLAY:
+		w.onReplayMsg(msg)
+	case DEAD:
+		return
+	}
 }
