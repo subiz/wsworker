@@ -10,11 +10,13 @@ import (
 	"time"
 )
 
-const (
+var (
 	CLOSED = "closed"
 	DEAD   = "dead"
 	NORMAL = "normal"
 	REPLAY = "replay"
+	DEADERR = errors.New("dead")
+	REPLAYINGERR = errors.New("replaying")
 )
 
 type Ws interface {
@@ -22,15 +24,6 @@ type Ws interface {
 	Recv() ([]byte, error)
 	Ping() error
 	Send(data []byte) error
-}
-
-type IWorker interface {
-	SetConnection(req *http.Request, res http.ResponseWriter) error
-	PingCheck(time.Duration)
-	DeadCheck(time.Duration)
-	CommitCheck()
-	OutdateCheck(time.Duration)
-	Send(msg *Message)
 }
 
 type Message struct {
@@ -59,7 +52,7 @@ type Worker struct {
 	replayQueue []*Message
 }
 
-func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) IWorker {
+func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Worker {
 	return &Worker{
 		Mutex:       &sync.Mutex{},
 		id:          id,
@@ -71,9 +64,6 @@ func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) IWor
 		replayQueue: []*Message{},
 	}
 }
-
-var DEADERR = errors.New("dead")
-var REPLAYINGERR = errors.New("replaying")
 
 func (w *Worker) recvLoop() {
 	for {

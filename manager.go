@@ -25,7 +25,7 @@ func runManager(m *Mgr, msgChan <-chan *Message, deadChan chan<- string, commitC
 	outdateTicker := time.NewTicker(OutdateDeadline)
 	deadTicker := time.NewTicker(DeadDeadline)
 	commitTicker := time.NewTicker(1 * time.Second)
-	workers := make(map[string]IWorker, 1000000)
+	workers := make(map[string]*Worker, 1000000)
 	for {
 		select {
 		case <-pingTicker.C: // ping all after PingDeadline
