@@ -197,13 +197,17 @@ func (w *Worker) toClosed() {
 }
 
 func (w *Worker) onNormalNewConn(newws Ws) {
-	w.ws.Close()
+	if w.ws != nil {
+		w.ws.Close()
+	}
 	w.ws = newws
 	w.toReplay()
 }
 
 func (w *Worker) onClosedNewConn(newws Ws) {
-	w.ws.Close()
+	if w.ws != nil {
+		w.ws.Close()
+	}
 	w.ws = newws
 	w.toReplay()
 }
