@@ -61,6 +61,7 @@ type Worker struct {
 
 func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) IWorker {
 	return &Worker{
+		Mutex:       &sync.Mutex{},
 		id:          id,
 		pinged:      time.Now(),
 		committed:   time.Now(),
