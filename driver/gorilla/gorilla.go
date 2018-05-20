@@ -7,10 +7,7 @@ import (
 )
 
 type Ws struct {
-	conn    *websocket.Conn
-	recv    chan []byte
-	recverr chan error
-	stopped bool
+	conn *websocket.Conn
 }
 
 func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
@@ -18,15 +15,7 @@ func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	ws := &Ws{
-		recv:    make(chan []byte, 2),
-		recverr: make(chan error, 2),
-		stopped: false,
-		conn:    conn,
-	}
-
-	go ws.readLoop()
+	ws := &Ws{conn: conn}
 	return ws, nil
 }
 
@@ -47,29 +36,16 @@ var (
 )
 
 func (ws *Ws) Close() error {
-	ws.stopped = true
 	return ws.conn.Close()
 }
 
-func (ws *Ws) Recv(d time.Duration) ([]byte, error) {
-	println("read now", d)
-	if err := ws.conn.SetReadDeadline(time.Now().Add(d)); err != nil {
-		return nil, err
-	}
-	println("start read")
+func (ws *Ws) Recv() ([]byte, error) {
 	_, p, err := ws.conn.ReadMessage()
-	println("done read")
 	if err != nil {
 		ws.Close()
 		return nil, err
 	}
-
-
 	return p, nil
-}
-
-func (ws *Ws) RecvErr() <-chan error {
-	return ws.recverr
 }
 
 func (ws *Ws) Send(data []byte) error {
@@ -90,10 +66,4 @@ func (ws *Ws) Ping() error {
 		return err
 	}
 	return nil
-}
-
-func (ws *Ws) readLoop() {
-	for !ws.stopped {
-
-	}
 }
