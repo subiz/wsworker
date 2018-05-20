@@ -63,6 +63,7 @@ func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) IWor
 	return &Worker{
 		Mutex:       &sync.Mutex{},
 		id:          id,
+		state:       CLOSED,
 		pinged:      time.Now(),
 		committed:   time.Now(),
 		deadChan:    deadChan,
@@ -90,6 +91,7 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
 	me.Lock()
 	defer me.Unlock()
 
+	log.Println("got setconnection", me.id)
 	ws, err := gorilla.NewWs(w, r, nil)
 	if err != nil {
 		return err
