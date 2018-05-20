@@ -77,12 +77,13 @@ var REPLAYINGERR = errors.New("replaying")
 
 func (w *Worker) recvLoop() {
 	for {
+		p, err := w.ws.Recv()
 		w.Lock()
 		if w.state != NORMAL {
 			w.Unlock()
 			return
 		}
-		w.onNormalRecv(w.ws.Recv())
+		w.onNormalRecv(p, err)
 		w.Unlock()
 	}
 }
@@ -91,7 +92,6 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
 	me.Lock()
 	defer me.Unlock()
 
-	log.Println("got setconnection", me.id)
 	ws, err := gorilla.NewWs(w, r, nil)
 	if err != nil {
 		return err
