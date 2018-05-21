@@ -11,11 +11,11 @@ import (
 )
 
 var (
-	CLOSED = "closed"
-	DEAD   = "dead"
-	NORMAL = "normal"
-	REPLAY = "replay"
-	DEADERR = errors.New("dead")
+	CLOSED       = "closed"
+	DEAD         = "dead"
+	NORMAL       = "normal"
+	REPLAY       = "replay"
+	DEADERR      = errors.New("dead")
 	REPLAYINGERR = errors.New("replaying")
 )
 
@@ -29,19 +29,19 @@ type Ws interface {
 
 type Message struct {
 	Id      string
-	Offset  int32
+	Offset  int64
 	Payload []byte
 }
 
 type Commit struct {
 	Id     string
-	Offset int32
+	Offset int64
 }
 
 type Worker struct {
 	*sync.Mutex
 	id          string
-	offset      int32
+	offset      int64
 	dirty       bool      // have message that have not been committed
 	pinged      time.Time // last pinged time
 	closed      time.Time // last closed time
@@ -59,6 +59,7 @@ func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Wor
 		id:          id,
 		state:       CLOSED,
 		pinged:      time.Now(),
+		closed:      time.Now(),
 		committed:   time.Now(),
 		deadChan:    deadChan,
 		commitChan:  commitChan,
@@ -71,14 +72,9 @@ func (w *Worker) recvLoop(ws Ws) {
 	for w.state == NORMAL && !ws.IsClosed() {
 		w.Unlock()
 		p, err := ws.Recv()
-		println("GOT", string(p) )
-		if err != nil {
-			println(err.Error())
-		}
 		w.Lock()
 		w.onNormalRecv(p, err)
 	}
-println("exit")
 	w.Unlock()
 }
 
@@ -104,7 +100,7 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
 }
 
 // chop queue, return new queue and the first offset
-func chop(queue []*Message, offset int32) []*Message {
+func chop(queue []*Message, offset int64) []*Message {
 	for i, msg := range queue {
 		if offset == msg.Offset {
 			return queue[i:]
@@ -232,9 +228,9 @@ func (w *Worker) toDead() {
 	w.deadChan <- w.id
 }
 
-func strToInt(str string) int32 {
-	i, _ := strconv.Atoi(str)
-	return int32(i)
+func strToInt(str string) int64 {
+	i, _ := strconv.ParseInt(str, 10, 0)
+	return i
 }
 
 func (w *Worker) PingCheck(deadline time.Duration) {
