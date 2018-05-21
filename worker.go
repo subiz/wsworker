@@ -20,6 +20,7 @@ var (
 )
 
 type Ws interface {
+	IsClosed() bool
 	Close() error
 	Recv() ([]byte, error)
 	Ping() error
@@ -65,17 +66,20 @@ func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Wor
 	}
 }
 
-func (w *Worker) recvLoop() {
-	for {
-		p, err := w.ws.Recv()
-		w.Lock()
-		if w.state != NORMAL {
-			w.Unlock()
-			return
-		}
-		w.onNormalRecv(p, err)
+func (w *Worker) recvLoop(ws Ws) {
+	w.Lock()
+	for w.state == NORMAL && !ws.IsClosed() {
 		w.Unlock()
+		p, err := ws.Recv()
+		println("GOT", string(p) )
+		if err != nil {
+			println(err.Error())
+		}
+		w.Lock()
+		w.onNormalRecv(p, err)
 	}
+println("exit")
+	w.Unlock()
 }
 
 func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
@@ -111,7 +115,7 @@ func chop(queue []*Message, offset int32) []*Message {
 
 func (w *Worker) toNormal() {
 	w.state = NORMAL
-	go w.recvLoop()
+	go w.recvLoop(w.ws)
 }
 
 func (w *Worker) onNormalPingCheck(deadline time.Duration) {
@@ -187,17 +191,11 @@ func (w *Worker) toClosed() {
 }
 
 func (w *Worker) onNormalNewConn(newws Ws) {
-	if w.ws != nil {
-		w.ws.Close()
-	}
-	w.ws = newws
-	w.toReplay()
+	w.toClosed()
+	w.onClosedNewConn(newws)
 }
 
 func (w *Worker) onClosedNewConn(newws Ws) {
-	if w.ws != nil {
-		w.ws.Close()
-	}
 	w.ws = newws
 	w.toReplay()
 }
