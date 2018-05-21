@@ -8,6 +8,7 @@ import (
 
 type Ws struct {
 	conn *websocket.Conn
+	closed bool
 }
 
 func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
@@ -15,7 +16,7 @@ func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 	if err != nil {
 		return nil, err
 	}
-	ws := &Ws{conn: conn}
+	ws := &Ws{closed: false, conn: conn}
 	return ws, nil
 }
 
@@ -36,6 +37,10 @@ var (
 )
 
 func (ws *Ws) Close() error {
+	if ws == nil {
+		return nil
+	}
+	ws.closed = true
 	return ws.conn.Close()
 }
 
@@ -66,4 +71,8 @@ func (ws *Ws) Ping() error {
 		return err
 	}
 	return nil
+}
+
+func (ws *Ws) IsClosed() bool {
+	return ws == nil || ws.closed
 }
