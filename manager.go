@@ -8,6 +8,10 @@ import (
 type Mgr struct {
 	newConnC    chan *Conn
 	newConnErrC chan error
+	msgChan     chan *Message
+	stopped     bool
+	hasC        chan string
+	hasReplyC   chan bool
 }
 
 type Conn struct {
@@ -16,17 +20,21 @@ type Conn struct {
 	W  http.ResponseWriter
 }
 
-var PingDeadline = 3 * time.Minute
-var OutdateDeadline = 2 * time.Minute
-var DeadDeadline = 2 * time.Minute
+var (
+	PingDeadline    = 3 * time.Minute
+	OutdateDeadline = 2 * time.Minute
+	DeadDeadline    = 2 * time.Minute
+	pingTicker      = time.NewTicker(PingDeadline)
+	outdateTicker   = time.NewTicker(OutdateDeadline)
+	deadTicker      = time.NewTicker(DeadDeadline)
+	commitTicker    = time.NewTicker(1 * time.Second)
+)
 
-func runManager(m *Mgr, msgChan <-chan *Message, deadChan chan<- string, commitChan chan<- Commit) {
-	pingTicker := time.NewTicker(PingDeadline)
-	outdateTicker := time.NewTicker(OutdateDeadline)
-	deadTicker := time.NewTicker(DeadDeadline)
-	commitTicker := time.NewTicker(1 * time.Second)
+func runManager(m *Mgr, deadChan chan<- string, commitChan chan<- Commit) {
 	workers := make(map[string]*Worker, 1000000)
-	for {
+	deadchan := make(chan string, 100)
+	m.stopped = false
+	for !m.stopped {
 		select {
 		case <-pingTicker.C: // ping all after PingDeadline
 			for _, w := range workers {
@@ -47,29 +55,54 @@ func runManager(m *Mgr, msgChan <-chan *Message, deadChan chan<- string, commitC
 		case conn := <-m.newConnC:
 			w := workers[conn.Id]
 			if w == nil {
-				w = NewWorker(conn.Id, deadChan, commitChan)
+				w = NewWorker(conn.Id, deadchan, commitChan)
 				workers[conn.Id] = w
 			}
 
 			m.newConnErrC <- w.SetConnection(conn.R, conn.W)
-		case msg := <-msgChan:
-			if w := workers[msg.Id]; w != nil {
-				w.Send(msg)
+		case msg := <-m.msgChan:
+			w := workers[msg.Id]
+			if w == nil {
+				w = NewWorker(msg.Id, deadchan, commitChan)
+				workers[msg.Id] = w
 			}
+			w.Send(msg)
+		case id := <-deadchan:
+			delete(workers, id)
+			deadChan <- id
+		case id := <-m.hasC:
+			_, ok := workers[id]
+			m.hasReplyC <- ok
 		}
 	}
 }
 
-func NewManager(msgChan <-chan *Message, deadChan chan<- string, commitChan chan<- Commit) *Mgr {
+func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
 	m := &Mgr{
 		newConnC:    make(chan *Conn),
 		newConnErrC: make(chan error),
+		msgChan:     make(chan *Message),
+		hasC:        make(chan string),
+		hasReplyC:   make(chan bool),
 	}
-	go runManager(m, msgChan, deadChan, commitChan)
+	go runManager(m, deadChan, commitChan)
 	return m
 }
 
 func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string) error {
 	m.newConnC <- &Conn{Id: id, R: r, W: w}
 	return <-m.newConnErrC
+}
+
+func (m *Mgr) Send(id string, offset int64, payload []byte) {
+	m.msgChan <- &Message{Id: id, Offset: offset, Payload: payload}
+}
+
+func (m *Mgr) Stop() {
+	m.stopped = true
+}
+
+func (m *Mgr) Has(id string) bool {
+	m.hasC <- id
+	return <-m.hasReplyC
 }
