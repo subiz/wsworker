@@ -78,7 +78,7 @@ func (w *Worker) recvLoop(ws Ws) {
 	w.Unlock()
 }
 
-func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
+func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []byte) error {
 	me.Lock()
 	defer me.Unlock()
 
@@ -88,9 +88,9 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter) error {
 	}
 	switch me.state {
 	case CLOSED:
-		me.onClosedNewConn(ws)
+		me.onClosedNewConn(ws, intro)
 	case NORMAL:
-		me.onNormalNewConn(ws)
+		me.onNormalNewConn(ws, intro)
 	case REPLAY:
 		return REPLAYINGERR
 	case DEAD:
@@ -128,6 +128,7 @@ func (w *Worker) onNormalPingCheck(deadline time.Duration) {
 
 func (w *Worker) onNormalOutdateCheck(deadline time.Duration) {
 	if deadline < time.Since(w.committed) && 0 < len(w.replayQueue) {
+		println("DEAD", w.id)
 		w.toDead()
 		return
 	}
@@ -184,19 +185,24 @@ func (w *Worker) toReplay() {
 func (w *Worker) toClosed() {
 	w.state = CLOSED
 	w.closed = time.Now()
+	log.Printf("[wsworker: %s] CLOSING", w.id)
 	if w.ws != nil {
 		w.ws.Close()
 		w.ws = nil
 	}
 }
 
-func (w *Worker) onNormalNewConn(newws Ws) {
+func (w *Worker) onNormalNewConn(newws Ws, intro []byte) {
 	w.toClosed()
-	w.onClosedNewConn(newws)
+	w.onClosedNewConn(newws, intro)
 }
 
-func (w *Worker) onClosedNewConn(newws Ws) {
+func (w *Worker) onClosedNewConn(newws Ws, intro []byte) {
 	w.ws = newws
+	if intro != nil {
+		w.ws.Send(intro)
+		// ignore err because we will eventually find out when replay
+	}
 	w.toReplay()
 }
 

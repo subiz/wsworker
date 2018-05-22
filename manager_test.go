@@ -39,7 +39,7 @@ func handleHttp(mgr *Mgr) {
 func TestMain(m *testing.M) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		cid := r.URL.Query().Get("connection_id")
-		if err := mgr.SetConnection(r, w, cid); err != nil {
+		if err := mgr.SetConnection(r, w, cid, nil); err != nil {
 			panic(err)
 		}
 	})

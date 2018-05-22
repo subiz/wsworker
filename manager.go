@@ -15,24 +15,26 @@ type Mgr struct {
 }
 
 type Conn struct {
-	Id string
-	R  *http.Request
-	W  http.ResponseWriter
+	Id    string
+	R     *http.Request
+	W     http.ResponseWriter
+	Intro []byte
 }
 
 var (
 	PingDeadline    = 3 * time.Minute
 	OutdateDeadline = 2 * time.Minute
 	DeadDeadline    = 2 * time.Minute
-	pingTicker      = time.NewTicker(PingDeadline)
-	outdateTicker   = time.NewTicker(OutdateDeadline)
-	deadTicker      = time.NewTicker(DeadDeadline)
-	commitTicker    = time.NewTicker(1 * time.Second)
 )
 
 func runManager(m *Mgr, deadChan chan<- string, commitChan chan<- Commit) {
 	workers := make(map[string]*Worker, 1000000)
 	deadchan := make(chan string, 100)
+	pingTicker := time.NewTicker(PingDeadline)
+	outdateTicker := time.NewTicker(OutdateDeadline)
+	deadTicker := time.NewTicker(DeadDeadline)
+	commitTicker := time.NewTicker(1 * time.Second)
+
 	m.stopped = false
 	for !m.stopped {
 		select {
@@ -54,11 +56,11 @@ func runManager(m *Mgr, deadChan chan<- string, commitChan chan<- Commit) {
 			}
 		case conn := <-m.newConnC:
 			if w := workers[conn.Id]; w != nil {
-				m.newConnErrC <- w.SetConnection(conn.R, conn.W)
+				m.newConnErrC <- w.SetConnection(conn.R, conn.W, conn.Intro)
 				return
 			}
 			w := NewWorker(conn.Id, deadchan, commitChan)
-			err := w.SetConnection(conn.R, conn.W)
+			err := w.SetConnection(conn.R, conn.W, conn.Intro)
 			if err == nil {
 				workers[conn.Id] = w
 			}
@@ -92,8 +94,8 @@ func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
 	return m
 }
 
-func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string) error {
-	m.newConnC <- &Conn{Id: id, R: r, W: w}
+func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
+	m.newConnC <- &Conn{Id: id, R: r, W: w, Intro: intro}
 	return <-m.newConnErrC
 }
 
