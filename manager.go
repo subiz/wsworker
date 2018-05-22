@@ -53,13 +53,16 @@ func runManager(m *Mgr, deadChan chan<- string, commitChan chan<- Commit) {
 				w.OutdateCheck(OutdateDeadline)
 			}
 		case conn := <-m.newConnC:
-			w := workers[conn.Id]
-			if w == nil {
-				w = NewWorker(conn.Id, deadchan, commitChan)
+			if w := workers[conn.Id]; w != nil {
+				m.newConnErrC <- w.SetConnection(conn.R, conn.W)
+				return
+			}
+			w := NewWorker(conn.Id, deadchan, commitChan)
+			err := w.SetConnection(conn.R, conn.W)
+			if err == nil {
 				workers[conn.Id] = w
 			}
-
-			m.newConnErrC <- w.SetConnection(conn.R, conn.W)
+			m.newConnErrC <- err
 		case msg := <-m.msgChan:
 			w := workers[msg.Id]
 			if w == nil {

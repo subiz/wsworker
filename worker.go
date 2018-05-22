@@ -118,6 +118,7 @@ func (w *Worker) onNormalPingCheck(deadline time.Duration) {
 	if time.Since(w.pinged) < deadline {
 		return
 	}
+
 	if err := w.ws.Ping(); err != nil {
 		w.toClosed()
 		return
@@ -183,7 +184,10 @@ func (w *Worker) toReplay() {
 func (w *Worker) toClosed() {
 	w.state = CLOSED
 	w.closed = time.Now()
-	w.ws.Close()
+	if w.ws != nil {
+		w.ws.Close()
+		w.ws = nil
+	}
 }
 
 func (w *Worker) onNormalNewConn(newws Ws) {
@@ -223,7 +227,10 @@ func (w *Worker) toDead() {
 	log.Printf("[wsworker: %s] onDead", w.id)
 	// release resource
 	w.state = DEAD
-	w.ws.Close()
+	if w.ws != nil {
+		w.ws.Close()
+		w.ws = nil
+	}
 	w.replayQueue = nil
 	w.deadChan <- w.id
 }
