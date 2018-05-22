@@ -27,8 +27,7 @@ type Ws interface {
 	Send(data []byte) error
 }
 
-type Message struct {
-	Id      string
+type message struct {
 	Offset  int64
 	Payload []byte
 }
@@ -50,7 +49,7 @@ type Worker struct {
 	state       string
 	deadChan    chan<- string
 	commitChan  chan<- Commit
-	replayQueue []*Message
+	replayQueue []*message
 }
 
 func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Worker {
@@ -63,7 +62,7 @@ func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Wor
 		committed:   time.Now(),
 		deadChan:    deadChan,
 		commitChan:  commitChan,
-		replayQueue: []*Message{},
+		replayQueue: []*message{},
 	}
 }
 
@@ -117,7 +116,7 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []
 }
 
 // chop queue, return new queue and the first offset
-func chop(queue []*Message, offset int64) []*Message {
+func chop(queue []*message, offset int64) []*message {
 	for i, msg := range queue {
 		if offset == msg.Offset {
 			return queue[i:]
@@ -163,7 +162,7 @@ func (w *Worker) onNormalCommitCheck() {
 	w.dirty, w.replayQueue, w.committed = false, newqueue, time.Now()
 }
 
-func (w *Worker) onNormalMsg(msg *Message) {
+func (w *Worker) onNormalMsg(msg *message) {
 	w.replayQueue = append(w.replayQueue, msg)
 	if err := w.ws.Send(msg.Payload); err != nil {
 		log.Printf("[wsworker: %s] on send error %v", w.id, err)
@@ -180,7 +179,7 @@ func (w *Worker) onNormalRecv(p []byte, err error) {
 	w.offset, w.dirty = strToInt(string(p)), true
 }
 
-func (w *Worker) onReplayMsg(msg *Message) {
+func (w *Worker) onReplayMsg(msg *message) {
 	w.replayQueue = append(w.replayQueue, msg)
 }
 
@@ -220,7 +219,7 @@ func (w *Worker) onClosedNewConn(newws Ws, intro []byte) {
 	w.toReplay()
 }
 
-func (w *Worker) onClosedMsg(msg *Message) {
+func (w *Worker) onClosedMsg(msg *message) {
 	w.replayQueue = append(w.replayQueue, msg)
 }
 
@@ -304,7 +303,7 @@ func (w *Worker) OutdateCheck(deadline time.Duration) {
 	w.onNormalOutdateCheck(deadline)
 }
 
-func (w *Worker) Send(msg *Message) {
+func (w *Worker) Send(msg *message) {
 	w.Lock()
 	defer w.Unlock()
 	switch w.state {
