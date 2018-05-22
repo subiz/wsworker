@@ -62,11 +62,11 @@ func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Wor
 		committed:   time.Now(),
 		deadChan:    deadChan,
 		commitChan:  commitChan,
-		replayQueue: []*message{},
+		replayQueue: make([]*message, 0, 32),
 	}
 }
 
-func (w *Worker) Close() {
+func (w *Worker) Halt() {
 	w.Lock()
 	defer w.Unlock()
 	w.state = DEAD

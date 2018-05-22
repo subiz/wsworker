@@ -41,7 +41,7 @@ func runManager(m *Mgr, deadChan chan<- string, commitChan chan<- Commit) {
 	defer func() {
 		m.clearRun(commitTicker, deadTicker, outdateTicker, pingTicker)
 		for _, w := range workers {
-			w.Close()
+			w.Halt()
 		}
 	}()
 	m.stopped = false
