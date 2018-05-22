@@ -67,6 +67,19 @@ func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Wor
 	}
 }
 
+func (w *Worker) Close() {
+	w.Lock()
+	defer w.Unlock()
+	w.state = DEAD
+	if w.ws != nil {
+		w.ws.Close()
+	}
+	w.ws = nil
+	w.replayQueue = nil
+	w.deadChan = nil
+	w.commitChan = nil
+}
+
 func (w *Worker) recvLoop(ws Ws) {
 	w.Lock()
 	for w.state == NORMAL && !ws.IsClosed() {
