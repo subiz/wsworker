@@ -22,12 +22,12 @@ func TestClosed(t *testing.T) {
 			mgr.Send(toWsId(0), int64(i), []byte(fmt.Sprintf("%d", i)))
 		}
 	}()
-	doClosedClient(toWsId(0), "ws://localhost:8080", "http://localhost/")
+	doClosedClient(toWsId(0), "ws://localhost:8081", "http://localhost/")
 
 }
 
 func handleHttp(mgr *Mgr) {
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
 // create 100 client
@@ -56,7 +56,7 @@ func TestNormal(t *testing.T) {
 	commitChan := make(chan Commit, 1000)
 	mgr = NewManager(deadChan, commitChan)
 	for i := 0; i < 10; i++ {
-		go doClient(toWsId(i), "ws://localhost:8080", "http://localhost/")
+		go doClient(toWsId(i), "ws://localhost:8081", "http://localhost/")
 	}
 
 	time.Sleep(100 * time.Millisecond)
