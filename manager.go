@@ -15,7 +15,7 @@ type Mgr struct {
 }
 
 type workermessage struct {
-	id string
+	id  string
 	msg *message
 }
 
@@ -49,7 +49,7 @@ func runManager(m *Mgr, deadChan chan<- string, commitChan chan<- Commit) {
 		select {
 		case <-pingTicker.C: // ping all after PingDeadline
 			for _, w := range workers {
-				w.PingCheck(PingDeadline)
+				w.PingCheck()
 			}
 		case <-deadTicker.C: // move all closed ws to dead state
 			for _, w := range workers {
@@ -97,7 +97,7 @@ func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
 		newConnErrC: make(chan error),
 		msgChan:     make(chan *workermessage, 1000),
 		hasC:        make(chan string),
-		hasReplyC:  make(chan *Worker),
+		hasReplyC:   make(chan *Worker),
 	}
 	go runManager(m, deadChan, commitChan)
 	return m
