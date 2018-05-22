@@ -82,13 +82,17 @@ func (w *Worker) Close() {
 
 func (w *Worker) recvLoop(ws Ws) {
 	w.Lock()
+	defer w.Unlock()
+
 	for w.state == NORMAL && !ws.IsClosed() {
 		w.Unlock()
 		p, err := ws.Recv()
 		w.Lock()
+		if ws != w.ws {
+			return
+		}
 		w.onNormalRecv(p, err)
 	}
-	w.Unlock()
 }
 
 func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []byte) error {
@@ -182,15 +186,12 @@ func (w *Worker) onReplayMsg(msg *Message) {
 
 func (w *Worker) toReplay() {
 	w.state = REPLAY
-
 	for _, m := range w.replayQueue {
 		if err := w.ws.Send(m.Payload); err != nil {
 			log.Printf("[wsworker: %s] on send error %v", w.id, err)
 			w.toClosed()
 			return
 		}
-		w.Unlock()
-		w.Lock()
 	}
 	w.toNormal()
 }
