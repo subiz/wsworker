@@ -121,7 +121,7 @@ func (m *Mgr) Stop() {
 func (m *Mgr) Has(id string) bool {
 	defer func() { recover() }()
 	m.hasC <- id
-	return nil == <-m.hasReplyC
+	return nil != <-m.hasReplyC
 }
 
 func (m *Mgr) clearRun(tickers ...*time.Ticker) {
