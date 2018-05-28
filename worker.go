@@ -311,6 +311,6 @@ func (w *Worker) Send(msg *message) {
 	case REPLAY:
 		panic("by design, this should not happendedbool")
 	case DEAD:
-		return
+		w.onDeadMsg(msg)
 	}
 }
