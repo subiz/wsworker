@@ -2,140 +2,177 @@ package wsworker
 
 import (
 	"net/http"
+	"sync"
 	"time"
 )
 
 type Mgr struct {
-	newConnC    chan *conn
-	newConnErrC chan error
-	msgChan     chan *workermessage
-	stopped     bool
-	hasC        chan string
-	hasReplyC   chan *Worker
-}
-
-type workermessage struct {
-	id  string
-	msg *message
-}
-
-type conn struct {
-	Id    string
-	R     *http.Request
-	W     http.ResponseWriter
-	Intro []byte
+	*sync.RWMutex
+	stopped    bool
+	workers    map[string]*Worker
+	deadChan   chan<- string
+	commitChan chan<- Commit
 }
 
 var (
-	PingDeadline    = 3 * time.Minute
+	PingDeadline    = 30 * time.Second
 	OutdateDeadline = 2 * time.Minute
 	DeadDeadline    = 2 * time.Minute
 )
 
-func runManager(m *Mgr, deadChan chan<- string, commitChan chan<- Commit) {
-	workers := make(map[string]*Worker, 1000000)
-	pingTicker := time.NewTicker(PingDeadline)
-	outdateTicker := time.NewTicker(OutdateDeadline)
-	deadTicker := time.NewTicker(DeadDeadline)
-	commitTicker := time.NewTicker(1 * time.Second)
-	defer func() {
-		m.clearRun(commitTicker, deadTicker, outdateTicker, pingTicker)
-		for _, w := range workers {
-			w.Halt()
-		}
-	}()
-	m.stopped = false
+func (m *Mgr) checkPing() {
 	for !m.stopped {
-		select {
-		case <-pingTicker.C: // ping all after PingDeadline
-			for _, w := range workers {
-				w.PingCheck()
-			}
-		case <-deadTicker.C: // move all closed ws to dead state
-			for _, w := range workers {
-				if w.state == DEAD { // clean workers
-					delete(workers, w.id)
-					continue
-				}
-				w.DeadCheck(DeadDeadline)
-			}
-		case <-commitTicker.C: // commit all dirty ws
-			for _, w := range workers {
-				w.CommitCheck()
-			}
-		case <-outdateTicker.C: // remove all outdated ws
-			for _, w := range workers {
-				w.OutdateCheck(OutdateDeadline)
-			}
-		case conn := <-m.newConnC:
-			if w := workers[conn.Id]; w != nil {
-				m.newConnErrC <- w.SetConnection(conn.R, conn.W, conn.Intro)
-				break
-			}
-			w := NewWorker(conn.Id, deadChan, commitChan)
-			err := w.SetConnection(conn.R, conn.W, conn.Intro)
-			if err == nil {
-				workers[conn.Id] = w
-			}
-			m.newConnErrC <- err
-		case msg := <-m.msgChan:
-			w := workers[msg.id]
-			if w == nil {
-				w = NewWorker(msg.id, deadChan, commitChan)
-				workers[msg.id] = w
-			}
-			w.Send(msg.msg)
-		case id := <-m.hasC:
-			m.hasReplyC <- workers[id]
+		t := time.Now()
+		m.RLock()
+		for _, w := range m.workers {
+			m.RUnlock()
+			w.PingCheck()
+			m.RLock()
 		}
+		m.RUnlock()
+		if time.Since(t).Seconds() > 1 {
+			println("PPPPPPPPPPPP", int(time.Since(t).Seconds()))
+		}
+		time.Sleep(PingDeadline)
+	}
+}
+
+func (m *Mgr) cleanDeadWorkers() {
+	for !m.stopped {
+		m.RLock()
+		for _, w := range m.workers {
+			m.RUnlock()
+			if w.GetState() == DEAD {
+				m.Lock()
+				delete(m.workers, w.id)
+				m.Unlock()
+			}
+			m.RLock()
+		}
+		m.RUnlock()
+		time.Sleep(DeadDeadline)
+	}
+}
+
+func (m *Mgr) checkDead() {
+	for !m.stopped {
+		t := time.Now()
+		m.RLock()
+		for _, w := range m.workers {
+			m.RUnlock()
+			w.DeadCheck(DeadDeadline)
+			m.RLock()
+		}
+		m.RUnlock()
+		if time.Since(t).Seconds() > 1 {
+			println("DDDDDDDDDDDDDDDD", int(time.Since(t).Seconds()))
+		}
+		time.Sleep(DeadDeadline)
+	}
+}
+
+func (m *Mgr) checkOutdate() {
+	for !m.stopped {
+		t := time.Now()
+		m.RLock()
+		for _, w := range m.workers {
+			m.RUnlock()
+			w.OutdateCheck(OutdateDeadline)
+			m.RLock()
+		}
+		m.RUnlock()
+		if time.Since(t).Seconds() > 1 {
+			println("OOOOOOOOOOOOOO", int(time.Since(t).Seconds()))
+		}
+		time.Sleep(OutdateDeadline)
+	}
+}
+
+func (m *Mgr) doCommit() {
+	for !m.stopped {
+		t:=time.Now()
+		m.RLock()
+		for _, w := range m.workers {
+			m.RUnlock()
+			w.CommitCheck()
+			m.RLock()
+		}
+		m.RUnlock()
+		if time.Since(t).Seconds() > 1 {
+			println("IIIIIIIIIIIIII", int(time.Since(t).Seconds()))
+		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
 func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
 	m := &Mgr{
-		newConnC:    make(chan *conn),
-		newConnErrC: make(chan error),
-		msgChan:     make(chan *workermessage, 1000),
-		hasC:        make(chan string),
-		hasReplyC:   make(chan *Worker),
+		RWMutex:    &sync.RWMutex{},
+		deadChan:   deadChan,
+		commitChan: commitChan,
+		workers:    make(map[string]*Worker, 1000),
+		stopped:    false,
 	}
-	go runManager(m, deadChan, commitChan)
+	go m.doCommit()
+	go m.checkOutdate()
+	go m.checkDead()
+	go m.cleanDeadWorkers()
+	go m.checkPing()
 	return m
 }
 
 func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
-	defer func() { recover() }()
-	m.newConnC <- &conn{Id: id, R: r, W: w, Intro: intro}
-	return <-m.newConnErrC
+	t := time.Now()
+	m.RLock()
+	worker := m.workers[id]
+	m.RUnlock()
+	if worker == nil {
+		worker = NewWorker(id, m.deadChan, m.commitChan)
+		m.Lock()
+		m.workers[id] = worker
+		m.Unlock()
+	}
+	defer func() {
+		if time.Since(t).Seconds() > 1 {
+			println("CCCCCCCCCCCCCCCC", int(time.Since(t).Seconds()))
+		}
+	}()
+	return worker.SetConnection(r, w, intro)
 }
 
 func (m *Mgr) Send(id string, offset int64, payload []byte) {
-	defer func() { recover() }()
-	m.msgChan <- &workermessage{id, &message{Offset: offset, Payload: payload}}
+	t := time.Now()
+	m.RLock()
+	w := m.workers[id]
+	m.RUnlock()
+
+	if w == nil {
+		w = NewWorker(id, m.deadChan, m.commitChan)
+		m.Lock()
+		m.workers[id] = w
+		m.Unlock()
+	}
+
+	w.Send(&message{Offset: offset, Payload: payload})
+	if time.Since(t).Seconds() > 1 {
+		println("MMMMMMMMMMMMMMMMM", int(time.Since(t).Seconds()))
+	}
 }
 
 func (m *Mgr) Stop() {
+	m.Lock()
 	m.stopped = true
+	for _, w := range m.workers {
+//		m.Unlock()
+		go w.Halt()
+	//	m.Lock()
+	}
+	m.Unlock()
 }
 
 func (m *Mgr) Has(id string) bool {
-	defer func() { recover() }()
-	m.hasC <- id
-	return nil != <-m.hasReplyC
-}
-
-func (m *Mgr) clearRun(tickers ...*time.Ticker) {
-	for _, t := range tickers {
-		select {
-		case <-t.C:
-		default:
-		}
-		t.Stop()
-	}
-
-	close(m.newConnC)
-	close(m.newConnErrC)
-	close(m.msgChan)
-	close(m.hasC)
-	close(m.hasReplyC)
+	m.RLock()
+	_, ok := m.workers[id]
+	m.RUnlock()
+	return ok
 }
