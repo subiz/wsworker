@@ -164,7 +164,7 @@ func (m *Mgr) Stop() {
 	m.stopped = true
 	for _, w := range m.workers {
 //		m.Unlock()
-		go w.Halt()
+		w.Halt()
 	//	m.Lock()
 	}
 	m.Unlock()
