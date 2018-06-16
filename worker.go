@@ -110,7 +110,7 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []
 func chop(queue []*message, offset int64) []*message {
 	for i, msg := range queue {
 		if offset == msg.Offset {
-			return queue[i:]
+			return queue[i+1:]
 		}
 	}
 	return queue
@@ -123,6 +123,7 @@ func (w *Worker) toNormal() {
 
 func (w *Worker) onNormalPingCheck() {
 	if err := w.ws.Ping(); err != nil {
+		log.Printf("[wsworker: %s] ping err %v", w.id, err)
 		w.toClosed()
 		return
 	}
@@ -130,7 +131,7 @@ func (w *Worker) onNormalPingCheck() {
 
 func (w *Worker) onNormalOutdateCheck(deadline time.Duration) {
 	if deadline < time.Since(w.committed) && 0 < len(w.replayQueue) {
-		println("DEAD", w.id)
+		log.Printf("[wsworker: %s] dead by replay queue time", w.id)
 		w.toDead()
 		return
 	}
@@ -151,6 +152,7 @@ func (w *Worker) onNormalCommitCheck() {
 func (w *Worker) onNormalMsg(msg *message) {
 	w.replayQueue = append(w.replayQueue, msg)
 	if len(w.replayQueue) > 2000 {
+		log.Printf("[wsworker: %s] dead by replay queue size", w.id)
 		w.toDead()
 	}
 
@@ -163,6 +165,7 @@ func (w *Worker) onNormalMsg(msg *message) {
 
 func (w *Worker) onNormalRecv(p []byte, err error) {
 	if err != nil {
+		log.Printf("[wsworker: %s] to error, normal recv %v", w.id, err)
 		w.toClosed()
 		return
 	}
@@ -192,6 +195,7 @@ func (w *Worker) toClosed() {
 }
 
 func (w *Worker) onNormalNewConn(newws Ws, intro []byte) {
+	log.Printf("[wsworker: %s] new on normal", w.id)
 	w.toClosed()
 	w.onClosedNewConn(newws, intro)
 }
@@ -216,6 +220,7 @@ func (w *Worker) onClosedDeadCheck(deadline time.Duration) {
 	if time.Since(w.closed) < deadline {
 		return
 	}
+	log.Printf("[wsworker: %s] dead by close check", w.id)
 	w.toDead()
 }
 
@@ -313,4 +318,10 @@ func (w *Worker) Send(msg *message) {
 	case DEAD:
 		w.onDeadMsg(msg)
 	}
+}
+
+func (w *Worker) GetState() string {
+	w.Lock()
+	defer w.Unlock()
+	return w.state
 }
