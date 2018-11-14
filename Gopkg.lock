@@ -2,52 +2,27 @@
 
 
 [[projects]]
-  branch = "master"
-  name = "github.com/gobwas/httphead"
-  packages = ["."]
-  revision = "2c6c146eadee0b69f856f87e3e9f1d0cd6aad2f5"
-
-[[projects]]
-  name = "github.com/gobwas/pool"
-  packages = [
-    ".",
-    "internal/pmath",
-    "pbufio",
-    "pbytes"
-  ]
-  revision = "fa3125c39d7eca32e1387bb69b1b38dcb31b1e0b"
-  version = "v0.2.0"
-
-[[projects]]
-  name = "github.com/gobwas/ws"
-  packages = [
-    ".",
-    "wsutil"
-  ]
-  revision = "b93773f50025fc1c14bbd7e97a3b170aae9a0977"
-  version = "v0.1.0"
-
-[[projects]]
+  digest = "1:7b5c6e2eeaa9ae5907c391a91c132abfd5c9e8a784a341b5625e750c67e6825d"
   name = "github.com/gorilla/websocket"
   packages = ["."]
-  revision = "ea4d1f681babbce9545c9c5f3d5194a789c89f5b"
-  version = "v1.2.0"
+  pruneopts = "UT"
+  revision = "66b9c49e59c6c48f0ffce28c2d8b8a5678502c6d"
+  version = "v1.4.0"
 
 [[projects]]
   branch = "master"
+  digest = "1:7427036b6d926b3d1fa0773771820735b35554a98296f1074df440ee30a97296"
   name = "golang.org/x/net"
   packages = ["websocket"]
-  revision = "db08ff08e8622530d9ed3a0e8ac279f6d4c02196"
-
-[[projects]]
-  branch = "master"
-  name = "golang.org/x/sys"
-  packages = ["unix"]
-  revision = "6c888cc515d3ed83fc103cf1d84468aad274b0a7"
+  pruneopts = "UT"
+  revision = "88d92db4c548972d942ac2a3531a8a9a34c82ca6"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "c6e11201ff51b488de72d01ccf77ad1a4fbd9e40d75e7cc9d88d2a82c35a1a09"
+  input-imports = [
+    "github.com/gorilla/websocket",
+    "golang.org/x/net/websocket",
+  ]
   solver-name = "gps-cdcl"
   solver-version = 1
