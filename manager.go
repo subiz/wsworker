@@ -22,7 +22,6 @@ var (
 
 func (m *Mgr) checkPing() {
 	for !m.stopped {
-		t := time.Now()
 		m.RLock()
 		for _, w := range m.workers {
 			m.RUnlock()
@@ -30,9 +29,6 @@ func (m *Mgr) checkPing() {
 			m.RLock()
 		}
 		m.RUnlock()
-		if time.Since(t).Seconds() > 1 {
-			println("PPPPPPPPPPPP", int(time.Since(t).Seconds()))
-		}
 		time.Sleep(PingDeadline)
 	}
 }
@@ -56,7 +52,6 @@ func (m *Mgr) cleanDeadWorkers() {
 
 func (m *Mgr) checkDead() {
 	for !m.stopped {
-		t := time.Now()
 		m.RLock()
 		for _, w := range m.workers {
 			m.RUnlock()
@@ -64,16 +59,12 @@ func (m *Mgr) checkDead() {
 			m.RLock()
 		}
 		m.RUnlock()
-		if time.Since(t).Seconds() > 1 {
-			println("DDDDDDDDDDDDDDDD", int(time.Since(t).Seconds()))
-		}
 		time.Sleep(DeadDeadline)
 	}
 }
 
 func (m *Mgr) checkOutdate() {
 	for !m.stopped {
-		t := time.Now()
 		m.RLock()
 		for _, w := range m.workers {
 			m.RUnlock()
@@ -81,16 +72,12 @@ func (m *Mgr) checkOutdate() {
 			m.RLock()
 		}
 		m.RUnlock()
-		if time.Since(t).Seconds() > 1 {
-			println("OOOOOOOOOOOOOO", int(time.Since(t).Seconds()))
-		}
 		time.Sleep(OutdateDeadline)
 	}
 }
 
 func (m *Mgr) doCommit() {
 	for !m.stopped {
-		t:=time.Now()
 		m.RLock()
 		for _, w := range m.workers {
 			m.RUnlock()
@@ -98,9 +85,6 @@ func (m *Mgr) doCommit() {
 			m.RLock()
 		}
 		m.RUnlock()
-		if time.Since(t).Seconds() > 1 {
-			println("IIIIIIIIIIIIII", int(time.Since(t).Seconds()))
-		}
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -122,7 +106,6 @@ func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
 }
 
 func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
-	t := time.Now()
 	m.RLock()
 	worker := m.workers[id]
 	m.RUnlock()
@@ -132,16 +115,10 @@ func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, i
 		m.workers[id] = worker
 		m.Unlock()
 	}
-	defer func() {
-		if time.Since(t).Seconds() > 1 {
-			println("CCCCCCCCCCCCCCCC", int(time.Since(t).Seconds()))
-		}
-	}()
 	return worker.SetConnection(r, w, intro)
 }
 
 func (m *Mgr) Send(id string, offset int64, payload []byte) {
-	t := time.Now()
 	m.RLock()
 	w := m.workers[id]
 	m.RUnlock()
@@ -154,18 +131,15 @@ func (m *Mgr) Send(id string, offset int64, payload []byte) {
 	}
 
 	w.Send(&message{Offset: offset, Payload: payload})
-	if time.Since(t).Seconds() > 1 {
-		println("MMMMMMMMMMMMMMMMM", int(time.Since(t).Seconds()))
-	}
 }
 
 func (m *Mgr) Stop() {
 	m.Lock()
 	m.stopped = true
 	for _, w := range m.workers {
-//		m.Unlock()
+		//		m.Unlock()
 		w.Halt()
-	//	m.Lock()
+		//	m.Lock()
 	}
 	m.Unlock()
 }

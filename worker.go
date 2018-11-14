@@ -1,8 +1,8 @@
 package wsworker
 
 import (
-	"bitbucket.org/subiz/wsworker/driver/gorilla"
 	"errors"
+	"git.subiz.net/wsworker/driver/gorilla"
 	"log"
 	"net/http"
 	"strconv"
