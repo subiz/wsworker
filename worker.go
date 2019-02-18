@@ -150,12 +150,21 @@ func (w *Worker) onNormalCommitCheck() {
 }
 
 func (w *Worker) onNormalMsg(msg *message) {
+	if msg == nil || w.ws == nil {
+		w.toDead()
+		return
+	}
 	w.replayQueue = append(w.replayQueue, msg)
 	if len(w.replayQueue) > 2000 {
 		log.Printf("[wsworker: %s] dead by replay queue size", w.id)
 		w.toDead()
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			w.toDead()
+		}
+	}()
 	if err := w.ws.Send(msg.Payload); err != nil {
 		log.Printf("[wsworker: %s] on send error %v", w.id, err)
 		w.toClosed()
