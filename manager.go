@@ -15,7 +15,7 @@ type Mgr struct {
 }
 
 var (
-	PingDeadline    = 30 * time.Second
+	PingDeadline    = 15 * time.Second
 	OutdateDeadline = 2 * time.Minute
 	DeadDeadline    = 2 * time.Minute
 )
