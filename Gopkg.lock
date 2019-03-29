@@ -15,7 +15,7 @@
   name = "golang.org/x/net"
   packages = ["websocket"]
   pruneopts = "UT"
-  revision = "3a22650c66bd7f4fb6d1e8072ffd7b75c8a27898"
+  revision = "74de082e2cca95839e88aa0aeee5aadf6ce7710f"
 
 [solve-meta]
   analyzer-name = "dep"

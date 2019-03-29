@@ -2,7 +2,7 @@ package wsworker
 
 import (
 	"errors"
-	"git.subiz.net/wsworker/driver/gorilla"
+	"github.com/subiz/wsworker/driver/gorilla"
 	"log"
 	"net/http"
 	"strconv"
