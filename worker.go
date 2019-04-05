@@ -39,7 +39,7 @@ type Commit struct {
 
 type Worker struct {
 	*sync.Mutex
-	id          string
+	Id          string
 	offset      int64
 	dirty       bool      // have message that have not been committed
 	closed      time.Time // last closed time
@@ -54,7 +54,7 @@ type Worker struct {
 func NewWorker(id string, deadChan chan<- string, commitChan chan<- Commit) *Worker {
 	return &Worker{
 		Mutex:       &sync.Mutex{},
-		id:          id,
+		Id:          id,
 		state:       CLOSED,
 		closed:      time.Now(),
 		committed:   time.Now(),
@@ -70,21 +70,6 @@ func (w *Worker) Halt() {
 	w.toDead()
 }
 
-func (w *Worker) recvLoop(ws Ws) {
-	w.Lock()
-	defer w.Unlock()
-
-	for w.state == NORMAL && !ws.IsClosed() {
-		w.Unlock()
-		p, err := ws.Recv()
-		w.Lock()
-		if ws != w.ws {
-			return
-		}
-		w.onNormalRecv(p, err)
-	}
-}
-
 func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []byte) error {
 	me.Lock()
 	defer me.Unlock()
@@ -95,9 +80,22 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []
 	}
 	switch me.state {
 	case CLOSED:
-		me.onClosedNewConn(ws, intro)
+		me.ws = ws
+		if intro != nil {
+			me.ws.Send(intro)
+			// ignore err because we will eventually find out when replay
+		}
+		me.toReplay()
 	case NORMAL:
-		me.onNormalNewConn(ws, intro)
+		log.Printf("[wsworker: %s] new on normal", me.Id)
+		me.toClosed()
+
+		me.ws = ws
+		if intro != nil {
+			me.ws.Send(intro)
+			// ignore err because we will eventually find out when replay
+		}
+		me.toReplay()
 	case REPLAY:
 		return REPLAYINGERR
 	case DEAD:
@@ -116,37 +114,30 @@ func chop(queue []*message, offset int64) []*message {
 	return queue
 }
 
-func (w *Worker) toNormal() {
-	w.state = NORMAL
-	go w.recvLoop(w.ws)
-}
+func (me *Worker) toNormal() {
+	me.state = NORMAL
+	go func() {
+		ws := me.ws
+		me.Lock()
+		for me.state == NORMAL && !ws.IsClosed() {
+			me.Unlock()
+			p, err := ws.Recv()
+			me.Lock()
 
-func (w *Worker) onNormalPingCheck() {
-	if err := w.ws.Ping(); err != nil {
-		log.Printf("[wsworker: %s] ping err %v", w.id, err)
-		w.toClosed()
-		return
-	}
-}
+			if ws != me.ws {
+				me.Unlock()
+				return
+			}
 
-func (w *Worker) onNormalOutdateCheck(deadline time.Duration) {
-	if deadline < time.Since(w.committed) && 0 < len(w.replayQueue) {
-		log.Printf("[wsworker: %s] dead by replay queue time", w.id)
-		w.toDead()
-		return
-	}
-}
-
-func (w *Worker) onNormalCommitCheck() {
-	if !w.dirty {
-		return
-	}
-
-	newqueue := chop(w.replayQueue, w.offset)
-	if len(newqueue) != len(w.replayQueue) {
-		w.commitChan <- Commit{Id: w.id, Offset: w.offset}
-	}
-	w.dirty, w.replayQueue, w.committed = false, newqueue, time.Now()
+			if err != nil {
+				log.Printf("[wsworker: %s] to error, normal recv %v", w.Id, err)
+				me.toClosed()
+				continue
+			}
+			me.offset, _ = strconv.ParseInt(string(p), 10, 0)
+			me.dirty = true
+		}
+	}()
 }
 
 func (w *Worker) onNormalMsg(msg *message) {
@@ -156,7 +147,7 @@ func (w *Worker) onNormalMsg(msg *message) {
 	}
 	w.replayQueue = append(w.replayQueue, msg)
 	if len(w.replayQueue) > 2000 {
-		log.Printf("[wsworker: %s] dead by replay queue size", w.id)
+		log.Printf("[wsworker: %s] dead by replay queue size", w.Id)
 		w.toDead()
 	}
 
@@ -166,26 +157,17 @@ func (w *Worker) onNormalMsg(msg *message) {
 		}
 	}()
 	if err := w.ws.Send(msg.Payload); err != nil {
-		log.Printf("[wsworker: %s] on send error %v", w.id, err)
+		log.Printf("[wsworker: %s] on send error %v", w.Id, err)
 		w.toClosed()
 		return
 	}
-}
-
-func (w *Worker) onNormalRecv(p []byte, err error) {
-	if err != nil {
-		log.Printf("[wsworker: %s] to error, normal recv %v", w.id, err)
-		w.toClosed()
-		return
-	}
-	w.offset, w.dirty = strToInt(string(p)), true
 }
 
 func (w *Worker) toReplay() {
 	w.state = REPLAY
 	for _, m := range w.replayQueue {
 		if err := w.ws.Send(m.Payload); err != nil {
-			log.Printf("[wsworker: %s] on send error %v", w.id, err)
+			log.Printf("[wsworker: %s] on send error %v", w.Id, err)
 			w.toClosed()
 			return
 		}
@@ -196,41 +178,11 @@ func (w *Worker) toReplay() {
 func (w *Worker) toClosed() {
 	w.state = CLOSED
 	w.closed = time.Now()
-	log.Printf("[wsworker: %s] CLOSING", w.id)
+	log.Printf("[wsworker: %s] CLOSING", w.Id)
 	if w.ws != nil {
 		w.ws.Close()
 		w.ws = nil
 	}
-}
-
-func (w *Worker) onNormalNewConn(newws Ws, intro []byte) {
-	log.Printf("[wsworker: %s] new on normal", w.id)
-	w.toClosed()
-	w.onClosedNewConn(newws, intro)
-}
-
-func (w *Worker) onClosedNewConn(newws Ws, intro []byte) {
-	w.ws = newws
-	if intro != nil {
-		w.ws.Send(intro)
-		// ignore err because we will eventually find out when replay
-	}
-	w.toReplay()
-}
-
-func (w *Worker) onClosedMsg(msg *message) {
-	w.replayQueue = append(w.replayQueue, msg)
-	if len(w.replayQueue) > 2000 {
-		w.toDead()
-	}
-}
-
-func (w *Worker) onClosedDeadCheck(deadline time.Duration) {
-	if time.Since(w.closed) < deadline {
-		return
-	}
-	log.Printf("[wsworker: %s] dead by close check", w.id)
-	w.toDead()
 }
 
 // state = closed
@@ -242,11 +194,15 @@ func (w *Worker) DeadCheck(deadline time.Duration) {
 		return
 	}
 
-	w.onClosedDeadCheck(deadline)
+	if time.Since(w.closed) < deadline {
+		return
+	}
+	log.Printf("[wsworker: %s] dead by close check %v", w.Id, time.Since(w.closed))
+	w.toDead()
 }
 
 func (w *Worker) toDead() {
-	log.Printf("[wsworker: %s] onDead", w.id)
+	log.Printf("[wsworker: %s] onDead", w.Id)
 	// release resource
 	w.state = DEAD
 	if w.ws != nil {
@@ -255,15 +211,10 @@ func (w *Worker) toDead() {
 	}
 	if len(w.replayQueue) != 0 { // commit the last message
 		lastmsg := w.replayQueue[len(w.replayQueue)-1]
-		w.commitChan <- Commit{Id: w.id, Offset: lastmsg.Offset}
+		w.commitChan <- Commit{Id: w.Id, Offset: lastmsg.Offset}
 		w.replayQueue = nil
 	}
-	w.deadChan <- w.id
-}
-
-func strToInt(str string) int64 {
-	i, _ := strconv.ParseInt(str, 10, 0)
-	return i
+	w.deadChan <- w.Id
 }
 
 func (w *Worker) PingCheck() {
@@ -274,18 +225,11 @@ func (w *Worker) PingCheck() {
 		return
 	}
 
-	w.onNormalPingCheck()
-}
-
-func (w *Worker) DieCheck(deadline time.Duration) {
-	w.Lock()
-	defer w.Unlock()
-
-	if w.state != CLOSED {
+	if err := w.ws.Ping(); err != nil {
+		log.Printf("[wsworker: %s] ping err %v", w.Id, err)
+		w.toClosed()
 		return
 	}
-
-	w.onClosedDeadCheck(deadline)
 }
 
 func (w *Worker) CommitCheck() {
@@ -296,7 +240,15 @@ func (w *Worker) CommitCheck() {
 		return
 	}
 
-	w.onNormalCommitCheck()
+	if !w.dirty {
+		return
+	}
+
+	newqueue := chop(w.replayQueue, w.offset)
+	if len(newqueue) != len(w.replayQueue) {
+		w.commitChan <- Commit{Id: w.Id, Offset: w.offset}
+	}
+	w.dirty, w.replayQueue, w.committed = false, newqueue, time.Now()
 }
 
 func (w *Worker) OutdateCheck(deadline time.Duration) {
@@ -307,28 +259,34 @@ func (w *Worker) OutdateCheck(deadline time.Duration) {
 		return
 	}
 
-	w.onNormalOutdateCheck(deadline)
+	if deadline < time.Since(w.committed) && 0 < len(w.replayQueue) {
+		log.Printf("[wsworker: %s] dead by replay queue time, %d, %v", w.Id, len(w.replayQueue), time.Since(w.committed))
+		w.toDead()
+		return
+	}
 }
 
-func (w *Worker) onDeadMsg(msg *message) {
-	w.commitChan <- Commit{Id: w.id, Offset: msg.Offset}
-}
-
+// Send
 func (w *Worker) Send(msg *message) {
 	w.Lock()
 	defer w.Unlock()
+
 	switch w.state {
 	case NORMAL:
 		w.onNormalMsg(msg)
 	case CLOSED:
-		w.onClosedMsg(msg)
+		w.replayQueue = append(w.replayQueue, msg)
+		if len(w.replayQueue) > 2000 {
+			w.toDead()
+		}
 	case REPLAY:
 		panic("by design, this should not happendedbool")
 	case DEAD:
-		w.onDeadMsg(msg)
+		w.commitChan <- Commit{Id: w.Id, Offset: msg.Offset}
 	}
 }
 
+// GetState returns current state of the worker
 func (w *Worker) GetState() string {
 	w.Lock()
 	defer w.Unlock()
