@@ -2,99 +2,25 @@ package wsworker
 
 import (
 	"net/http"
-	"sync"
 	"time"
 )
 
+// Mgr manages websocket connections
+// each connection is managed by a worker
 type Mgr struct {
-	*sync.RWMutex
+	workers Map
+
 	stopped    bool
-	workers    map[string]*Worker
 	deadChan   chan<- string
 	commitChan chan<- Commit
 }
 
-var (
-	PingDeadline    = 15 * time.Second
-	OutdateDeadline = 2 * time.Minute
-	DeadDeadline    = 2 * time.Minute
-)
-
-func (m *Mgr) checkPing() {
-	for !m.stopped {
-		m.RLock()
-		for _, w := range m.workers {
-			m.RUnlock()
-			w.PingCheck()
-			m.RLock()
-		}
-		m.RUnlock()
-		time.Sleep(PingDeadline)
-	}
-}
-
-func (m *Mgr) cleanDeadWorkers() {
-	for !m.stopped {
-		m.RLock()
-		for _, w := range m.workers {
-			m.RUnlock()
-			if w.GetState() == DEAD {
-				m.Lock()
-				delete(m.workers, w.id)
-				m.Unlock()
-			}
-			m.RLock()
-		}
-		m.RUnlock()
-		time.Sleep(DeadDeadline)
-	}
-}
-
-func (m *Mgr) checkDead() {
-	for !m.stopped {
-		m.RLock()
-		for _, w := range m.workers {
-			m.RUnlock()
-			w.DeadCheck(DeadDeadline)
-			m.RLock()
-		}
-		m.RUnlock()
-		time.Sleep(DeadDeadline)
-	}
-}
-
-func (m *Mgr) checkOutdate() {
-	for !m.stopped {
-		m.RLock()
-		for _, w := range m.workers {
-			m.RUnlock()
-			w.OutdateCheck(OutdateDeadline)
-			m.RLock()
-		}
-		m.RUnlock()
-		time.Sleep(OutdateDeadline)
-	}
-}
-
-func (m *Mgr) doCommit() {
-	for !m.stopped {
-		m.RLock()
-		for _, w := range m.workers {
-			m.RUnlock()
-			w.CommitCheck()
-			m.RLock()
-		}
-		m.RUnlock()
-		time.Sleep(1 * time.Second)
-	}
-}
-
+// NewManager creates a new Mgr object
 func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
 	m := &Mgr{
-		RWMutex:    &sync.RWMutex{},
+		workers:    NewMap(),
 		deadChan:   deadChan,
 		commitChan: commitChan,
-		workers:    make(map[string]*Worker, 1000),
 		stopped:    false,
 	}
 	go m.doCommit()
@@ -105,48 +31,85 @@ func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
 	return m
 }
 
+// checkPing runs ping check loop
+func (me *Mgr) checkPing() {
+	for !me.stopped {
+		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).PingCheck() })
+		time.Sleep(PingDeadline)
+	}
+}
+
+// cleanDeadWorker runs a loop which removes dead workers every DeadDeadline seconds
+func (me *Mgr) cleanDeadWorkers() {
+	for !me.stopped {
+		me.workers.Scan(func(id string, w interface{}) {
+			if w.(*Worker).GetState() == DEAD {
+				me.workers.Delete(id)
+			}
+		})
+		time.Sleep(DeadDeadline)
+	}
+}
+
+// checkDead runs a loop which call DeadCheck on every worker
+func (me *Mgr) checkDead() {
+	for !me.stopped {
+		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).DeadCheck(DeadDeadline) })
+		time.Sleep(DeadDeadline)
+	}
+}
+
+// checkOutdate runs a loop which call OutdateCheck on every worker
+func (me *Mgr) checkOutdate() {
+	for !me.stopped {
+		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).OutdateCheck(OutdateDeadline) })
+		time.Sleep(OutdateDeadline)
+	}
+}
+
+// doCommit runs a loop which call CommitCheck on every worker
+func (me *Mgr) doCommit() {
+	for !me.stopped {
+		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).CommitCheck() })
+		time.Sleep(1 * time.Second)
+	}
+}
+
 func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
-	m.RLock()
-	worker := m.workers[id]
-	m.RUnlock()
-	if worker == nil {
+	wi, ok := m.workers.Get(id)
+	var worker *Worker
+	if ok {
+		worker = wi.(*Worker)
+	} else {
 		worker = NewWorker(id, m.deadChan, m.commitChan)
-		m.Lock()
-		m.workers[id] = worker
-		m.Unlock()
+		m.workers.Set(id, worker)
 	}
 	return worker.SetConnection(r, w, intro)
 }
 
 func (m *Mgr) Send(id string, offset int64, payload []byte) {
-	m.RLock()
-	w := m.workers[id]
-	m.RUnlock()
+	wi, _ := m.workers.Get(id)
+	worker := wi.(*Worker)
 
-	if w == nil {
-		w = NewWorker(id, m.deadChan, m.commitChan)
-		m.Lock()
-		m.workers[id] = w
-		m.Unlock()
+	if worker == nil {
+		worker = NewWorker(id, m.deadChan, m.commitChan)
+		m.workers.Set(id, worker)
 	}
-
-	w.Send(&message{Offset: offset, Payload: payload})
+	worker.Send(&message{Offset: offset, Payload: payload})
 }
 
-func (m *Mgr) Stop() {
-	m.Lock()
-	m.stopped = true
-	for _, w := range m.workers {
-		//		m.Unlock()
-		w.Halt()
-		//	m.Lock()
-	}
-	m.Unlock()
+func (me *Mgr) Stop() {
+	me.stopped = true
+	me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).Halt() })
 }
 
 func (m *Mgr) Has(id string) bool {
-	m.RLock()
-	_, ok := m.workers[id]
-	m.RUnlock()
+	_, ok := m.workers.Get(id)
 	return ok
 }
+
+var (
+	PingDeadline    = 15 * time.Second
+	OutdateDeadline = 2 * time.Minute
+	DeadDeadline    = 2 * time.Minute
+)
