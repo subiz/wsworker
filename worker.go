@@ -130,7 +130,7 @@ func (me *Worker) toNormal() {
 			}
 
 			if err != nil {
-				log.Printf("[wsworker: %s] to error, normal recv %v", w.Id, err)
+				log.Printf("[wsworker: %s] to error, normal recv %v", me.Id, err)
 				me.toClosed()
 				continue
 			}
