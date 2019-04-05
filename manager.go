@@ -87,13 +87,14 @@ func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, i
 	return worker.SetConnection(r, w, intro)
 }
 
-func (m *Mgr) Send(id string, offset int64, payload []byte) {
-	wi, _ := m.workers.Get(id)
-	worker := wi.(*Worker)
-
-	if worker == nil {
-		worker = NewWorker(id, m.deadChan, m.commitChan)
-		m.workers.Set(id, worker)
+func (me *Mgr) Send(id string, offset int64, payload []byte) {
+	wi, ok := me.workers.Get(id)
+	var worker *Worker
+	if ok {
+		worker = wi.(*Worker)
+	} else {
+		worker = NewWorker(id, me.deadChan, me.commitChan)
+		me.workers.Set(id, worker)
 	}
 	worker.Send(&message{Offset: offset, Payload: payload})
 }
