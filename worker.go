@@ -39,8 +39,6 @@ type Worker struct {
 	// holds offset of the latest commit received from the client
 	latest_committed_offset int64
 
-	dirty bool // have message that have not been committed
-
 	closed int64 // last closed time
 
 	ws Ws // used to communicate with the websocket connection
@@ -50,10 +48,6 @@ type Worker struct {
 
 	// a channel of worker's ID, used notify the manager that the worker is dead
 	deadChan chan<- string
-
-	// a channel of message offset, used to notify the manager that client has
-	// commit an offset
-	commitChan chan<- int64
 
 	// number of second that worker must commit when receive send
 	// or it will be killed
@@ -67,14 +61,13 @@ type Worker struct {
 }
 
 // NewWorker creates a new Worker object
-func NewWorker(id string, deadChan chan<- string, commitChan chan<- int64) *Worker {
+func NewWorker(id string, deadChan chan<- string) *Worker {
 	return &Worker{
 		Mutex:          &sync.Mutex{},
 		Id:             id,
 		state:          CLOSED,
 		closed:         time.Now().Unix(),
 		deadChan:       deadChan,
-		commitChan:     commitChan,
 		closeDeadline:  int64(DeadDeadline.Seconds()),
 		commitDeadline: int64(OutdateDeadline.Seconds()),
 		buffer:         make([]message, 0, 32),
@@ -126,12 +119,15 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []
 // chop returns a new queue contains only messages behind the matched message
 // return the same queue if no message match the given offset
 func chop(queue []message, offset int64) []message {
-	for i, msg := range queue {
-		if offset == msg.Offset {
-			return queue[i+1:]
+	for i := range queue {
+		if offset < queue[i].Offset {
+			if i == 0 {
+				return queue
+			}
+			return queue[i:]
 		}
 	}
-	return queue
+	return []message{}
 }
 
 // toNormal switchs worker to NORMAL state
@@ -159,8 +155,12 @@ func (me *Worker) toNormal() {
 				me.toClosed()
 				continue
 			}
-			me.latest_committed_offset, _ = strconv.ParseInt(string(p), 10, 0)
-			me.dirty = true
+
+			offset, _ := strconv.ParseInt(string(p), 10, 0)
+			if offset < me.latest_committed_offset { // ignore invalid offset
+				continue
+			}
+			me.latest_committed_offset = offset
 		}
 	}()
 }
@@ -214,7 +214,7 @@ func (me *Worker) toDead() {
 	}
 	if len(me.buffer) != 0 { // release all dirty messages
 		lastmsg := me.buffer[len(me.buffer)-1]
-		me.commitChan <- lastmsg.Offset
+		me.latest_committed_offset = lastmsg.Offset
 		me.buffer = nil
 	}
 	me.deadChan <- me.Id
@@ -236,23 +236,21 @@ func (me *Worker) Ping() {
 	}
 }
 
-func (me *Worker) CommitCheck() {
+// commit
+func (me *Worker) Commit() int64 {
 	me.Lock()
 	defer me.Unlock()
 
 	if me.state != NORMAL {
-		return
+		return -1
 	}
 
-	if !me.dirty {
-		return
+	newbuffer := chop(me.buffer, me.latest_committed_offset)
+	if len(newbuffer) != len(me.buffer) {
+		me.buffer = newbuffer
+		return me.latest_committed_offset
 	}
-
-	newqueue := chop(me.buffer, me.latest_committed_offset)
-	if len(newqueue) != len(me.buffer) {
-		me.commitChan <- me.latest_committed_offset
-	}
-	me.dirty, me.buffer = false, newqueue
+	return -1
 }
 
 // OutdateCheck kills worker if client don't commit in time
@@ -260,10 +258,6 @@ func (me *Worker) CommitCheck() {
 func (me *Worker) OutdateCheck() {
 	me.Lock()
 	defer me.Unlock()
-
-	//	if me.state != NORMAL {
-	//	return
-	//}
 
 	now := time.Now().Unix() // second
 	if me.first_dirty_sent_sec == 0 ||
@@ -281,7 +275,9 @@ func (me *Worker) Send(offset int64, payload []byte) {
 	defer me.Unlock()
 
 	if me.state == DEAD {
-		me.commitChan <- offset
+		if offset > me.latest_committed_offset {
+			me.latest_committed_offset = offset
+		}
 		return
 	}
 

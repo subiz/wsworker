@@ -65,7 +65,11 @@ func (me *Mgr) checkOutdate() {
 // doCommit runs a loop which call CommitCheck on every worker
 func (me *Mgr) doCommit() {
 	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).CommitCheck() })
+		me.workers.Scan(func(_ string, w interface{}) {
+			if offset := w.(*Worker).Commit(); offset > 0 {
+				me.commitChan <- offset // TODO: must go through offset mgr
+			}
+		})
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -73,7 +77,7 @@ func (me *Mgr) doCommit() {
 func (me *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
 	wi, ok := me.workers.Get(id)
 	if !ok {
-		wi = NewWorker(id, me.deadChan, me.commitChan)
+		wi = NewWorker(id, me.deadChan)
 		me.workers.Set(id, wi)
 	}
 	return wi.(*Worker).SetConnection(r, w, intro)
@@ -82,7 +86,7 @@ func (me *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, 
 func (me *Mgr) Send(id string, offset int64, payload []byte) {
 	wi, ok := me.workers.Get(id)
 	if !ok {
-		wi = NewWorker(id, me.deadChan, me.commitChan)
+		wi = NewWorker(id, me.deadChan)
 		me.workers.Set(id, wi)
 	}
 	wi.(*Worker).Send(offset, payload)
