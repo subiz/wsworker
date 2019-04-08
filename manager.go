@@ -12,30 +12,25 @@ type Mgr struct {
 
 	stopped    bool
 	deadChan   chan<- string
-	commitChan chan<- Commit
+	commitChan chan<- int64
 }
 
 // NewManager creates a new Mgr object
-func NewManager(deadChan chan<- string, commitChan chan<- Commit) *Mgr {
-	m := &Mgr{
-		workers:    NewMap(),
-		deadChan:   deadChan,
-		commitChan: commitChan,
-		stopped:    false,
-	}
+func NewManager(deadChan chan<- string, commitChan chan<- int64) *Mgr {
+	m := &Mgr{workers: NewMap(), deadChan: deadChan, commitChan: commitChan}
 	go m.doCommit()
 	go m.checkOutdate()
 	go m.checkDead()
 	go m.cleanDeadWorkers()
-	go m.checkPing()
+	go m.doPing()
 	return m
 }
 
 // checkPing runs ping check loop
-func (me *Mgr) checkPing() {
+func (me *Mgr) doPing() {
 	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).PingCheck() })
-		time.Sleep(PingDeadline)
+		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).Ping() })
+		time.Sleep(PingInterval)
 	}
 }
 
@@ -54,7 +49,7 @@ func (me *Mgr) cleanDeadWorkers() {
 // checkDead runs a loop which call DeadCheck on every worker
 func (me *Mgr) checkDead() {
 	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).DeadCheck(DeadDeadline) })
+		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).DeadCheck() })
 		time.Sleep(DeadDeadline)
 	}
 }
@@ -62,7 +57,7 @@ func (me *Mgr) checkDead() {
 // checkOutdate runs a loop which call OutdateCheck on every worker
 func (me *Mgr) checkOutdate() {
 	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).OutdateCheck(OutdateDeadline) })
+		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).OutdateCheck() })
 		time.Sleep(OutdateDeadline)
 	}
 }
@@ -75,28 +70,22 @@ func (me *Mgr) doCommit() {
 	}
 }
 
-func (m *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
-	wi, ok := m.workers.Get(id)
-	var worker *Worker
-	if ok {
-		worker = wi.(*Worker)
-	} else {
-		worker = NewWorker(id, m.deadChan, m.commitChan)
-		m.workers.Set(id, worker)
+func (me *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
+	wi, ok := me.workers.Get(id)
+	if !ok {
+		wi = NewWorker(id, me.deadChan, me.commitChan)
+		me.workers.Set(id, wi)
 	}
-	return worker.SetConnection(r, w, intro)
+	return wi.(*Worker).SetConnection(r, w, intro)
 }
 
 func (me *Mgr) Send(id string, offset int64, payload []byte) {
 	wi, ok := me.workers.Get(id)
-	var worker *Worker
-	if ok {
-		worker = wi.(*Worker)
-	} else {
-		worker = NewWorker(id, me.deadChan, me.commitChan)
-		me.workers.Set(id, worker)
+	if !ok {
+		wi = NewWorker(id, me.deadChan, me.commitChan)
+		me.workers.Set(id, wi)
 	}
-	worker.Send(&message{Offset: offset, Payload: payload})
+	wi.(*Worker).Send(offset, payload)
 }
 
 func (me *Mgr) Stop() {
@@ -104,13 +93,8 @@ func (me *Mgr) Stop() {
 	me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).Halt() })
 }
 
-func (m *Mgr) Has(id string) bool {
-	_, ok := m.workers.Get(id)
-	return ok
-}
-
 var (
-	PingDeadline    = 15 * time.Second
+	PingInterval    = 15 * time.Second
 	OutdateDeadline = 2 * time.Minute
 	DeadDeadline    = 2 * time.Minute
 )
