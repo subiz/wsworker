@@ -1,6 +1,7 @@
 package wsworker
 
 import (
+	"errors"
 	"net/http"
 	"time"
 )
@@ -74,11 +75,17 @@ func (me *Mgr) doCommit() {
 	}
 }
 
-func (me *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
+func (me *Mgr) CreateIfNotExistConnection(id string) {
+	_, ok := me.workers.Get(id)
+	if !ok {
+		me.workers.Set(id, NewWorker(id, me.deadChan))
+	}
+}
+
+func (me *Mgr) Connect(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
 	wi, ok := me.workers.Get(id)
 	if !ok {
-		wi = NewWorker(id, me.deadChan)
-		me.workers.Set(id, wi)
+		return CONNECTIONNOTFOUNDERR
 	}
 	return wi.(*Worker).SetConnection(r, w, intro)
 }
@@ -86,8 +93,7 @@ func (me *Mgr) SetConnection(r *http.Request, w http.ResponseWriter, id string, 
 func (me *Mgr) Send(id string, offset int64, payload []byte) {
 	wi, ok := me.workers.Get(id)
 	if !ok {
-		wi = NewWorker(id, me.deadChan)
-		me.workers.Set(id, wi)
+		return
 	}
 	wi.(*Worker).Send(offset, payload)
 }
@@ -101,4 +107,5 @@ var (
 	PingInterval    = 15 * time.Second
 	OutdateDeadline = 2 * time.Minute
 	DeadDeadline    = 2 * time.Minute
+	CONNECTIONNOTFOUNDERR = errors.New("connection not found")
 )
