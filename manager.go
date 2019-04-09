@@ -10,7 +10,9 @@ import (
 type Mgr struct {
 	workers Map
 
-	stopped    bool
+	stopped bool
+
+	// a channel of worker's ID, used notify the manager that the worker is dead
 	deadChan   chan<- string
 	commitChan chan<- int64
 }
@@ -19,11 +21,35 @@ type Mgr struct {
 func NewManager(deadChan chan<- string, commitChan chan<- int64) *Mgr {
 	m := &Mgr{workers: NewMap(), deadChan: deadChan, commitChan: commitChan}
 	go m.doCommit()
-	go m.checkOutdate()
-	go m.checkDead()
 	go m.cleanDeadWorkers()
 	go m.doPing()
 	return m
+}
+
+// cleanDeadWorker runs a loop which removes dead workers
+func (me *Mgr) cleanDeadWorkers() {
+	// holds dead workers
+	deadWorkers := make(map[string]int64)
+
+	for !me.stopped {
+		now := time.Now().Unix()
+		me.workers.Scan(func(id string, w interface{}) {
+			exp_sec := deadWorkers[id]
+			if exp_sec == 0 {
+				if w.(*Worker).GetState() == DEAD {
+					deadWorkers[id] = now + 3600 //
+					me.deadChan <- id
+				}
+				return
+			}
+
+			if exp_sec < now { // clear the dead worker after 1 hour
+				me.workers.Delete(id)
+				delete(deadWorkers, id)
+			}
+		})
+		time.Sleep(30 * time.Minute)
+	}
 }
 
 // checkPing runs ping check loop
@@ -34,63 +60,30 @@ func (me *Mgr) doPing() {
 	}
 }
 
-// cleanDeadWorker runs a loop which removes dead workers every DeadDeadline seconds
-func (me *Mgr) cleanDeadWorkers() {
-	for !me.stopped {
-		me.workers.Scan(func(id string, w interface{}) {
-			if w.(*Worker).GetState() == DEAD {
-				me.workers.Delete(id)
-			}
-		})
-		time.Sleep(DeadDeadline)
-	}
-}
-
-// checkDead runs a loop which call DeadCheck on every worker
-func (me *Mgr) checkDead() {
-	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).DeadCheck() })
-		time.Sleep(DeadDeadline)
-	}
-}
-
-// checkOutdate runs a loop which call OutdateCheck on every worker
-func (me *Mgr) checkOutdate() {
-	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).OutdateCheck() })
-		time.Sleep(OutdateDeadline)
-	}
-}
-
 // doCommit runs a loop which call CommitCheck on every worker
 func (me *Mgr) doCommit() {
 	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) {
+		me.workers.Scan(func(id string, w interface{}) {
 			for _, offset := range w.(*Worker).Commit() {
-				me.commitChan <- offset // TODO: must go through offset mgr
+				me.commitChan <- offset
 			}
 		})
 		time.Sleep(5 * time.Second)
 	}
 }
 
-// makeSureWorker returns existings worker or creates a new worker if id not found
-func (me *Mgr) makeSureWorker(id string) *Worker {
-	wi, ok := me.workers.Get(id)
-	if !ok {
-		w := NewWorker(id, me.deadChan)
-		me.workers.Set(id, w)
-		return w
-	}
-	return wi.(*Worker)
-}
-
 func (me *Mgr) Connect(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
-	return me.makeSureWorker(id).Connect(r, w, intro)
+	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id) }).(*Worker)
+	return worker.Connect(r, w, intro)
 }
 
 func (me *Mgr) Send(id string, offset int64, payload []byte) {
-	me.makeSureWorker(id).Send(offset, payload)
+	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id) }).(*Worker)
+	if err := worker.Send(offset, payload); err == DEADERR {
+		// the worker is dead and unable to handle the message
+		// we ignores the message by committing it
+		me.commitChan <- offset
+	}
 }
 
 func (me *Mgr) Stop() {
