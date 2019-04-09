@@ -7,18 +7,14 @@ import (
 	"time"
 )
 
-type Ws struct {
-	conn *websocket.Conn
-	closed bool
-}
+type Ws struct{ conn *websocket.Conn }
 
 func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 	conn, err := upgrader.Upgrade(w, r, h)
 	if err != nil {
 		return nil, err
 	}
-	ws := &Ws{closed: false, conn: conn}
-	return ws, nil
+	return &Ws{conn: conn}, nil
 }
 
 var (
@@ -29,10 +25,8 @@ var (
 	WriteWait = 21 * time.Second
 
 	upgrader = websocket.Upgrader{
-		ReadBufferSize: MaxMessageSize,
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+		ReadBufferSize:  MaxMessageSize,
+		CheckOrigin:     func(r *http.Request) bool { return true },
 		WriteBufferSize: MaxMessageSize,
 	}
 )
@@ -41,7 +35,6 @@ func (ws *Ws) Close() error {
 	if ws == nil {
 		return nil
 	}
-	ws.closed = true
 	return ws.conn.Close()
 }
 
@@ -73,14 +66,12 @@ func (ws *Ws) Send(data []byte) (err error) {
 }
 
 func (ws *Ws) Ping() error {
-	ws.conn.SetWriteDeadline(time.Now().Add(WriteWait))
+	if err := ws.conn.SetWriteDeadline(time.Now().Add(WriteWait)); err != nil {
+		return err
+	}
 	if err := ws.conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
 		ws.Close()
 		return err
 	}
 	return nil
-}
-
-func (ws *Ws) IsClosed() bool {
-	return ws == nil || ws.closed
 }

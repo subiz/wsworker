@@ -86,7 +86,7 @@ func (me *Mgr) makeSureWorker(id string) *Worker {
 }
 
 func (me *Mgr) Connect(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
-	return me.makeSureWorker(id).SetConnection(r, w, intro)
+	return me.makeSureWorker(id).Connect(r, w, intro)
 }
 
 func (me *Mgr) Send(id string, offset int64, payload []byte) {
