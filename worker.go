@@ -25,8 +25,9 @@ type Ws interface {
 }
 
 type message struct {
-	Offset  int64
-	Payload []byte
+	offset  int64
+	payload []byte
+	sent    int64 // unix second tells when message is sent
 }
 
 type Worker struct {
@@ -45,28 +46,22 @@ type Worker struct {
 	// holds the current mode of the worker, could be NORMAL, CLOSED, DEAD, ...
 	state string
 
-	// a channel of worker's ID, used notify the manager that the worker is dead
-	deadChan chan<- string
-
 	// number of second that worker must commit when receive send
 	// or it will be killed
 	commitDeadline int64
 
 	closeDeadline int64
 
-	first_dirty_sent_sec int64 // unix sec record the time of the first message sent after the last commited
-
 	buffer []message
 }
 
 // NewWorker creates a new Worker object
-func NewWorker(id string, deadChan chan<- string) *Worker {
+func NewWorker(id string) *Worker {
 	return &Worker{
 		Mutex:          &sync.Mutex{},
 		Id:             id,
 		state:          CLOSED,
 		closed:         time.Now().Unix(),
-		deadChan:       deadChan,
 		closeDeadline:  int64(DeadDeadline.Seconds()),
 		commitDeadline: int64(OutdateDeadline.Seconds()),
 		buffer:         make([]message, 0, 32),
@@ -100,8 +95,8 @@ func (me *Worker) Connect(r *http.Request, w http.ResponseWriter, intro []byte) 
 			}
 		}
 
-		for _, m := range me.buffer {
-			if err := me.ws.Send(m.Payload); err != nil {
+		for _, msg := range me.buffer {
+			if err := me.ws.Send(msg.payload); err != nil {
 				log.Printf("[wsworker: %s] on send error %v", me.Id, err)
 				me.toClosed()
 				return nil
@@ -164,26 +159,8 @@ func (me *Worker) toClosed() {
 	}
 }
 
-// DeadCheck kills worker which is closed for too long
-func (me *Worker) DeadCheck() {
-	me.Lock()
-	defer me.Unlock()
-
-	if me.state != CLOSED {
-		return
-	}
-
-	now := time.Now().Unix() // second
-	if now-me.closed < me.closeDeadline {
-		return
-	}
-	log.Printf("[wsworker: %s] dead by close check", me.Id)
-	me.toDead()
-}
-
 // toDead switchs worker to DEAD mode, release all holding resources
-// once worker is dead, it cannot be reused, user should not call any method
-// (execept GetState) afterward.
+// once worker is dead, it cannot be reused. User should not Send message on dead ws
 // Note: this function is not thread safe, caller should lock the worker before use
 func (me *Worker) toDead() {
 	if me.state == DEAD {
@@ -194,29 +171,36 @@ func (me *Worker) toDead() {
 	me.state = DEAD
 	if me.ws != nil {
 		me.ws.Close()
-		me.ws = nil
 	}
 	if len(me.buffer) != 0 { // release all dirty messages
 		lastmsg := me.buffer[len(me.buffer)-1]
-		me.latest_committed_offset = lastmsg.Offset
-		me.buffer = nil
+		me.latest_committed_offset = lastmsg.offset
 	}
-	me.deadChan <- me.Id
 }
 
 // Ping delivers a ping message to the client
+// returns the current state of the worker
 func (me *Worker) Ping() {
 	me.Lock()
 	defer me.Unlock()
 
-	if me.state != NORMAL {
+	switch me.state {
+	case DEAD:
 		return
-	}
-
-	if err := me.ws.Ping(); err != nil {
-		log.Printf("[wsworker: %s] ping err %v", me.Id, err)
-		me.toClosed()
+	case CLOSED:
+		now := time.Now().Unix() // second
+		if now-me.closed < me.closeDeadline {
+			return
+		}
+		log.Printf("[wsworker: %s] dead by close check", me.Id)
+		me.toDead()
 		return
+	case NORMAL:
+		if err := me.ws.Ping(); err != nil {
+			log.Printf("[wsworker: %s] ping err %v", me.Id, err)
+			me.toClosed()
+			return
+		}
 	}
 }
 
@@ -224,70 +208,61 @@ func (me *Worker) Ping() {
 func (me *Worker) Commit() []int64 {
 	me.Lock()
 	defer me.Unlock()
-	if me.state != NORMAL {
-		return nil
-	}
 
 	var committed_offsets []int64
 	for i := range me.buffer {
-		if me.latest_committed_offset < me.buffer[i].Offset {
-			if i == 0 { // too small
-				return nil
-			}
-			me.buffer = me.buffer[i:]
-			return committed_offsets
+		if me.buffer[i].offset <= me.latest_committed_offset {
+			committed_offsets = append(committed_offsets, me.buffer[i].offset)
+			continue
 		}
-		committed_offsets = append(committed_offsets, me.buffer[i].Offset)
+
+		if i > 0 { // me.buffer[0:] is slow (maybe)
+			me.buffer = me.buffer[i:]
+		}
+
+		if len(me.buffer) > 0 {
+			// kills worker if client don't commit in time
+			firstmsg := me.buffer[0]
+			timesincefirstsent := time.Now().Unix() - firstmsg.sent // second
+			if timesincefirstsent > me.commitDeadline {
+				log.Printf("[wsworker: %s] dead by late commit", me.Id)
+				me.toDead()
+			}
+		}
+		return committed_offsets
 	}
 	me.buffer = nil
 	return committed_offsets
 }
 
-// OutdateCheck kills worker if client don't commit in time
-// dealine is number of second
-func (me *Worker) OutdateCheck() {
-	me.Lock()
-	defer me.Unlock()
-
-	now := time.Now().Unix() // second
-	if me.first_dirty_sent_sec == 0 ||
-		now-me.first_dirty_sent_sec < me.commitDeadline {
-		return
-	}
-
-	log.Printf("[wsworker: %s] dead by late commit", me.Id)
-	me.toDead()
-}
-
 // Send delivers a message to the client
-func (me *Worker) Send(offset int64, payload []byte) {
+// ignore the request if the worker is DEAD
+func (me *Worker) Send(offset int64, payload []byte) error {
 	me.Lock()
 	defer me.Unlock()
 	if me.state == DEAD {
-		if offset > me.latest_committed_offset {
-			me.latest_committed_offset = offset
-		}
-		return
+		return DEADERR
 	}
 
-	// state == NORMAL and CLOSED
-	me.buffer = append(me.buffer, message{Offset: offset, Payload: payload})
+	now := time.Now().Unix()
+	me.buffer = append(me.buffer, message{offset: offset, payload: payload, sent: now})
 	if len(me.buffer) > 20000 {
 		log.Printf("[wsworker: %s] dead by buffer overflow", me.Id)
 		me.toDead()
-		return
+		return nil
 	}
 
 	if me.state == NORMAL {
 		if err := me.ws.Send(payload); err != nil {
 			log.Printf("[wsworker: %s] on send error %v", me.Id, err)
 			me.toClosed()
-			return
+			return nil
 		}
 	}
+	return nil
 }
 
-// GetState returns current state of the worker
+// GetState returns current state of the worker, could be "dead", "normal" or "closed"
 func (me *Worker) GetState() string {
 	me.Lock()
 	defer me.Unlock()
