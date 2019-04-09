@@ -7,23 +7,49 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestClosed(t *testing.T) {
 	deadChan := make(chan string, 1000)
-	commitChan := make(chan Commit, 1000)
+	commitChan := make(chan int64, 1000)
 	mgr = NewManager(deadChan, commitChan)
+
+	id := toWsId(0)
 
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		for i := 0; i < 100; i++ {
-			mgr.Send(toWsId(0), int64(i), []byte(fmt.Sprintf("%d", i)))
+			mgr.Send(id, int64(i), []byte(fmt.Sprintf("hello-%d", i)))
 		}
 	}()
-	doClosedClient(toWsId(0), "ws://localhost:8081", "http://localhost/")
+	mgr.CreateIfNotExistConnection(id)
+	origin := "http://localhost/"
+	url := "ws://localhost:8081"
 
+	ws, err := websocket.Dial(url+"?connection_id="+id, "", origin)
+	if err != nil {
+		log.Fatalf("hix %v", err)
+	}
+
+	//if _, err := ws.Write([]byte("hello, world!\n")); err != nil {
+	//log.Fatalf("hihi %v", err)
+	//}
+	for i := 0; i < 100; i++ {
+		msg := make([]byte, 512)
+		var n int
+		if n, err = ws.Read(msg); err != nil {
+			log.Fatalf("this %v", err)
+		}
+		if string(msg[:n]) != fmt.Sprintf("hello-%d", i) {
+			t.Fatalf("wrong received message, shoud be '%s', got '%s'.", fmt.Sprintf("hello-%d", i), msg)
+		}
+	}
+	if err := ws.Close(); err != nil {
+		log.Fatalf("close err %v", err)
+	}
 }
 
 func handleHttp(mgr *Mgr) {
@@ -39,7 +65,7 @@ func handleHttp(mgr *Mgr) {
 func TestMain(m *testing.M) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		cid := r.URL.Query().Get("connection_id")
-		if err := mgr.SetConnection(r, w, cid, nil); err != nil {
+		if err := mgr.Connect(r, w, cid, nil); err != nil {
 			panic(err)
 		}
 	})
@@ -51,95 +77,78 @@ func TestMain(m *testing.M) {
 var mgr *Mgr
 
 func TestNormal(t *testing.T) {
-	t.Skip()
 	deadChan := make(chan string, 1000)
-	commitChan := make(chan Commit, 1000)
+	commitChan := make(chan int64, 1000)
 	mgr = NewManager(deadChan, commitChan)
 	for i := 0; i < 10; i++ {
-		go doClient(toWsId(i), "ws://localhost:8081", "http://localhost/")
+		id := toWsId(i)
+		mgr.CreateIfNotExistConnection(toWsId(i))
+		go func(id string) {
+			url, origin := "ws://localhost:8081", "http://localhost/"
+			ws, err := websocket.Dial(url+"?connection_id="+id, "", origin)
+			if err != nil {
+				log.Fatalf("hix %v", err)
+			}
+
+			//if _, err := ws.Write([]byte("hello, world!\n")); err != nil {
+			//log.Fatalf("hihi %v", err)
+			//}
+			for {
+				msg := make([]byte, 512)
+				var n int
+				if n, err = ws.Read(msg); err != nil {
+					log.Fatalf("this %v", err)
+				}
+
+				// fmt.Printf("got %s\n", msg)
+				msg_split := strings.Split(string(msg[:n]), "-")
+				if len(msg_split) != 2 {
+					log.Fatalf("malform package %s", msg[:n])
+				}
+				// fmt.Println("commit", []byte(msg_split[1]))
+				if _, err := ws.Write([]byte(msg_split[1])); err != nil {
+					log.Fatalf("commit err %v", err)
+				}
+			}
+		}(id)
 	}
 
 	time.Sleep(100 * time.Millisecond)
 
 	for i := 0; i < 100; i++ {
-		mgr.Send(toWsId(i%10), int64(i), []byte(fmt.Sprintf("%d", i)))
+		mgr.Send(toWsId(i%10), int64(i), []byte(fmt.Sprintf("solo-%d", i)))
 	}
 
-	commits := make([]int64, 0)
+	committed_offsets := make([]int64, 0)
 	for c := range commitChan {
-		if 89 < c.Offset {
-			commits = append(commits, c.Offset)
-			if len(commits) == 10 {
+		committed_offsets = append(committed_offsets, c)
+		completed := true
+		for i := int64(0); i < 100; i++ {
+			found := false
+			for _, c := range committed_offsets {
+				if c == i {
+					found = true
+					break
+				}
+			}
+			if !found {
+				completed = false
 				break
 			}
 		}
-	}
-}
-
-func toWsId(i int) string {
-	return fmt.Sprintf("0WERASDF-%d", i)
-}
-
-func doClosedClient(id string, url, origin string) {
-	ws, err := websocket.Dial(url+"?connection_id="+id, "", origin)
-	if err != nil {
-		log.Fatalf("hix %v", err)
-	}
-
-	//if _, err := ws.Write([]byte("hello, world!\n")); err != nil {
-	//log.Fatalf("hihi %v", err)
-	//}
-	for i := 0; i < 4; i++ {
-		msg := make([]byte, 512)
-		var n int
-		if n, err = ws.Read(msg); err != nil {
-			log.Fatalf("this %v", err)
-		}
-		println("recev")
-
-		if _, err := ws.Write(msg[:n]); err != nil {
-			log.Fatalf("hihi %v", err)
-		}
-	}
-	PrintMemUsage()
-	time.Sleep(2 * time.Second)
-	println("closing")
-	//	time.Sleep(2 * time.Second)
-	if err := ws.Close(); err != nil {
-		panic(err)
-	}
-	time.Sleep(2 * time.Second)
-	PrintMemUsage()
-}
-
-func doClient(id string, url, origin string) {
-	ws, err := websocket.Dial(url+"?connection_id="+id, "", origin)
-	if err != nil {
-		log.Fatalf("hix %v", err)
-	}
-
-	//if _, err := ws.Write([]byte("hello, world!\n")); err != nil {
-	//log.Fatalf("hihi %v", err)
-	//}
-	for {
-		msg := make([]byte, 512)
-		var n int
-		if n, err = ws.Read(msg); err != nil {
-			//fmt.Println("hiahaha")
-			log.Fatalf("this %v", err)
-		}
-
-		if _, err := ws.Write(msg[:n]); err != nil {
-			log.Fatalf("hihi %v", err)
+		if completed {
+			break
 		}
 	}
 }
+
+func toWsId(i int) string { return fmt.Sprintf("0WERASDF-%d", i) }
 
 func PrintMemUsage() {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
-	fmt.Printf("Alloc %v | Total %v KiB | Sys %v KiB | %v Go\n", bToKb(m.Alloc), bToKb(m.TotalAlloc), bToKb(m.Sys), runtime.NumGoroutine())
+	fmt.Printf("Alloc %v | Total %v KiB | Sys %v KiB | %v Goroutines\n", bToKb(m.Alloc), bToKb(m.TotalAlloc), bToKb(m.Sys), runtime.NumGoroutine())
 }
 
 func bToKb(b uint64) uint64 {
