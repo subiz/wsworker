@@ -18,7 +18,6 @@ var (
 )
 
 type Ws interface {
-	IsClosed() bool
 	Close() error
 	Recv() ([]byte, error)
 	Ping() error
@@ -81,7 +80,7 @@ func (w *Worker) Halt() {
 	w.toDead()
 }
 
-func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []byte) error {
+func (me *Worker) Connect(r *http.Request, w http.ResponseWriter, intro []byte) error {
 	me.Lock()
 	defer me.Unlock()
 
@@ -126,22 +125,21 @@ func (me *Worker) toNormal() {
 	go func() {
 		ws := me.ws
 		me.Lock()
-		for me.state == NORMAL && !ws.IsClosed() {
-			me.Unlock()
-			p, err := ws.Recv()
-			me.Lock()
+		defer me.Unlock()
 
+		// locked region
+		for me.state == NORMAL {
 			if ws != me.ws {
-				me.Unlock()
 				return
 			}
-
+			me.Unlock() // end locked region
+			p, err := ws.Recv()
+			me.Lock() // start locked region
 			if err != nil {
 				log.Printf("[wsworker: %s] to error, normal recv %v", me.Id, err)
 				me.toClosed()
-				continue
+				return
 			}
-
 			offset, _ := strconv.ParseInt(string(p), 10, 0)
 			if offset < me.latest_committed_offset { // ignore invalid offset
 				continue
@@ -226,7 +224,6 @@ func (me *Worker) Ping() {
 func (me *Worker) Commit() []int64 {
 	me.Lock()
 	defer me.Unlock()
-
 	if me.state != NORMAL {
 		return nil
 	}
@@ -266,7 +263,6 @@ func (me *Worker) OutdateCheck() {
 func (me *Worker) Send(offset int64, payload []byte) {
 	me.Lock()
 	defer me.Unlock()
-
 	if me.state == DEAD {
 		if offset > me.latest_committed_offset {
 			me.latest_committed_offset = offset
