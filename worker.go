@@ -179,7 +179,7 @@ func (me *Worker) DeadCheck() {
 	if now-me.closed < me.closeDeadline {
 		return
 	}
-	log.Printf("[wsworker: %s] dead by close check %v", me.Id)
+	log.Printf("[wsworker: %s] dead by close check", me.Id)
 	me.toDead()
 }
 

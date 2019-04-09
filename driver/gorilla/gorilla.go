@@ -1,6 +1,7 @@
 package gorilla
 
 import (
+	"fmt"
 	"github.com/gorilla/websocket"
 	"net/http"
 	"time"
@@ -53,7 +54,14 @@ func (ws *Ws) Recv() ([]byte, error) {
 	return p, nil
 }
 
-func (ws *Ws) Send(data []byte) error {
+func (ws *Ws) Send(data []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+			return
+		}
+	}()
+
 	writer, err := ws.conn.NextWriter(websocket.TextMessage)
 	if err != nil {
 		return err
