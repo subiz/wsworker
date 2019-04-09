@@ -116,20 +116,6 @@ func (me *Worker) SetConnection(r *http.Request, w http.ResponseWriter, intro []
 	return nil
 }
 
-// chop returns a new queue contains only messages behind the matched message
-// return the same queue if no message match the given offset
-func chop(queue []message, offset int64) []message {
-	for i := range queue {
-		if offset < queue[i].Offset {
-			if i == 0 {
-				return queue
-			}
-			return queue[i:]
-		}
-	}
-	return []message{}
-}
-
 // toNormal switchs worker to NORMAL state
 // Note: this function is not thread safe, caller should lock the worker before use
 func (me *Worker) toNormal() {
@@ -236,21 +222,28 @@ func (me *Worker) Ping() {
 	}
 }
 
-// commit
-func (me *Worker) Commit() int64 {
+// Commit returns commited offsets
+func (me *Worker) Commit() []int64 {
 	me.Lock()
 	defer me.Unlock()
 
 	if me.state != NORMAL {
-		return -1
+		return nil
 	}
 
-	newbuffer := chop(me.buffer, me.latest_committed_offset)
-	if len(newbuffer) != len(me.buffer) {
-		me.buffer = newbuffer
-		return me.latest_committed_offset
+	var committed_offsets []int64
+	for i := range me.buffer {
+		if me.latest_committed_offset < me.buffer[i].Offset {
+			if i == 0 { // too small
+				return nil
+			}
+			me.buffer = me.buffer[i:]
+			return committed_offsets
+		}
+		committed_offsets = append(committed_offsets, me.buffer[i].Offset)
 	}
-	return -1
+	me.buffer = nil
+	return committed_offsets
 }
 
 // OutdateCheck kills worker if client don't commit in time

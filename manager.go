@@ -67,7 +67,7 @@ func (me *Mgr) checkOutdate() {
 func (me *Mgr) doCommit() {
 	for !me.stopped {
 		me.workers.Scan(func(_ string, w interface{}) {
-			if offset := w.(*Worker).Commit(); offset > 0 {
+			for _, offset := range w.(*Worker).Commit() {
 				me.commitChan <- offset // TODO: must go through offset mgr
 			}
 		})
@@ -104,8 +104,8 @@ func (me *Mgr) Stop() {
 }
 
 var (
-	PingInterval    = 15 * time.Second
-	OutdateDeadline = 2 * time.Minute
-	DeadDeadline    = 2 * time.Minute
+	PingInterval          = 15 * time.Second
+	OutdateDeadline       = 2 * time.Minute
+	DeadDeadline          = 2 * time.Minute
 	CONNECTIONNOTFOUNDERR = errors.New("connection not found")
 )
