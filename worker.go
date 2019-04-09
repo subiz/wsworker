@@ -236,7 +236,7 @@ func (me *Worker) Send(offset int64, payload []byte) error {
 		return DEADERR
 	}
 
-	if me.state == NORMAL {
+	if me.state == NORMAL && me.ws != nil {
 		if err := me.ws.Send(payload); err != nil {
 			log.Printf("[wsworker: %s] on send error %v", me.Id, err)
 			me.detachConnection()
