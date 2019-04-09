@@ -11,7 +11,6 @@ import (
 )
 
 var (
-	CLOSED  = "closed"
 	DEAD    = "dead"
 	NORMAL  = "normal"
 	DEADERR = errors.New("dead")
@@ -39,7 +38,7 @@ type Worker struct {
 	// holds offset of the latest commit received from the client
 	latest_committed_offset int64
 
-	closed int64 // last closed time
+	detached int64 // last detached time in second
 
 	ws Ws // used to communicate with the websocket connection
 
@@ -60,8 +59,8 @@ func NewWorker(id string) *Worker {
 	return &Worker{
 		Mutex:          &sync.Mutex{},
 		Id:             id,
-		state:          CLOSED,
-		closed:         time.Now().Unix(),
+		state:          NORMAL,
+		detached:       time.Now().Unix(),
 		closeDeadline:  int64(DeadDeadline.Seconds()),
 		commitDeadline: int64(OutdateDeadline.Seconds()),
 		buffer:         make([]message, 0, 32),
@@ -79,60 +78,48 @@ func (me *Worker) Connect(r *http.Request, w http.ResponseWriter, intro []byte) 
 	me.Lock()
 	defer me.Unlock()
 
+	if me.state == DEAD {
+		return DEADERR
+	}
+
 	ws, err := gorilla.NewWs(w, r, nil)
 	if err != nil {
 		return err
 	}
 
-	switch me.state {
-	case CLOSED, NORMAL:
-		me.toClosed() // close the last websocket connection if existed
-
-		me.ws = ws
-		if intro != nil {
-			if err := me.ws.Send(intro); err != nil {
-				return err
-			}
+	me.detachConnection() // detach old connection if exists
+	me.ws = ws
+	if intro != nil {
+		if err := me.ws.Send(intro); err != nil {
+			me.detachConnection()
+			return err
 		}
+	}
 
-		for _, msg := range me.buffer {
-			if err := me.ws.Send(msg.payload); err != nil {
-				log.Printf("[wsworker: %s] on send error %v", me.Id, err)
-				me.toClosed()
-				return nil
-			}
+	// replay old messages
+	for _, msg := range me.buffer {
+		if err := me.ws.Send(msg.payload); err != nil {
+			log.Printf("[wsworker: %s] on send error %v", me.Id, err)
+			me.detachConnection()
+			return err
 		}
-		me.toNormal()
-
-	case DEAD:
-		return DEADERR
 	}
-	return nil
-}
 
-// toNormal switchs worker to NORMAL state
-// Note: this function is not thread safe, caller should lock the worker before use
-func (me *Worker) toNormal() {
-	if me.state == NORMAL {
-		return
-	}
-	me.state = NORMAL
 	go func() {
-		ws := me.ws
 		me.Lock()
-		defer me.Unlock()
-
 		// locked region
-		for me.state == NORMAL {
-			if ws != me.ws {
-				return
-			}
+		defer me.Unlock()
+		ws := me.ws
+		for me.state == NORMAL && ws != nil {
 			me.Unlock() // end locked region
 			p, err := ws.Recv()
-			me.Lock() // start locked region
+			me.Lock()        // start locked region
+			if me.ws != ws { // worker has detached this connection
+				return
+			}
 			if err != nil {
 				log.Printf("[wsworker: %s] to error, normal recv %v", me.Id, err)
-				me.toClosed()
+				me.detachConnection()
 				return
 			}
 			offset, _ := strconv.ParseInt(string(p), 10, 0)
@@ -142,21 +129,7 @@ func (me *Worker) toNormal() {
 			me.latest_committed_offset = offset
 		}
 	}()
-}
-
-// toClosed switchs worker to CLOSED mode
-// Note: this function is not thread safe, caller should lock the worker before use
-func (me *Worker) toClosed() {
-	if me.state == CLOSED {
-		return
-	}
-	me.state = CLOSED
-	me.closed = time.Now().Unix()
-	log.Printf("[wsworker: %s] CLOSING", me.Id)
-	if me.ws != nil {
-		me.ws.Close()
-		me.ws = nil
-	}
+	return nil
 }
 
 // toDead switchs worker to DEAD mode, release all holding resources
@@ -169,13 +142,23 @@ func (me *Worker) toDead() {
 	log.Printf("[wsworker: %s] onDead", me.Id)
 
 	me.state = DEAD
-	if me.ws != nil {
-		me.ws.Close()
-	}
+	me.detachConnection()
 	if len(me.buffer) != 0 { // release all dirty messages
 		lastmsg := me.buffer[len(me.buffer)-1]
 		me.latest_committed_offset = lastmsg.offset
 	}
+}
+
+// detachConnection closes the current websocket connection and remove it
+// out of worker
+// Note: this function is not thread safe, caller should lock the worker before use
+func (me *Worker) detachConnection() {
+	if me.ws == nil {
+		return
+	}
+	me.ws.Close()
+	me.detached = time.Now().Unix()
+	me.ws = nil
 }
 
 // Ping delivers a ping message to the client
@@ -187,18 +170,19 @@ func (me *Worker) Ping() {
 	switch me.state {
 	case DEAD:
 		return
-	case CLOSED:
-		now := time.Now().Unix() // second
-		if now-me.closed < me.closeDeadline {
+	case NORMAL:
+		if me.ws == nil { // worker is detached from the connection
+			now := time.Now().Unix() // second
+			if now-me.detached < me.closeDeadline {
+				return
+			}
+			log.Printf("[wsworker: %s] dead by close check", me.Id)
+			me.toDead()
 			return
 		}
-		log.Printf("[wsworker: %s] dead by close check", me.Id)
-		me.toDead()
-		return
-	case NORMAL:
 		if err := me.ws.Ping(); err != nil {
 			log.Printf("[wsworker: %s] ping err %v", me.Id, err)
-			me.toClosed()
+			me.detachConnection()
 			return
 		}
 	}
@@ -240,22 +224,22 @@ func (me *Worker) Commit() []int64 {
 func (me *Worker) Send(offset int64, payload []byte) error {
 	me.Lock()
 	defer me.Unlock()
+
 	if me.state == DEAD {
 		return DEADERR
 	}
-
 	now := time.Now().Unix()
 	me.buffer = append(me.buffer, message{offset: offset, payload: payload, sent: now})
 	if len(me.buffer) > 20000 {
 		log.Printf("[wsworker: %s] dead by buffer overflow", me.Id)
 		me.toDead()
-		return nil
+		return DEADERR
 	}
 
 	if me.state == NORMAL {
 		if err := me.ws.Send(payload); err != nil {
 			log.Printf("[wsworker: %s] on send error %v", me.Id, err)
-			me.toClosed()
+			me.detachConnection()
 			return nil
 		}
 	}

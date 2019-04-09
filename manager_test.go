@@ -88,9 +88,6 @@ func TestNormal(t *testing.T) {
 				log.Fatalf("hix %v", err)
 			}
 
-			//if _, err := ws.Write([]byte("hello, world!\n")); err != nil {
-			//log.Fatalf("hihi %v", err)
-			//}
 			for {
 				msg := make([]byte, 512)
 				var n int
