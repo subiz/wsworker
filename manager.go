@@ -1,7 +1,6 @@
 package wsworker
 
 import (
-	"errors"
 	"net/http"
 	"time"
 )
@@ -71,31 +70,27 @@ func (me *Mgr) doCommit() {
 				me.commitChan <- offset // TODO: must go through offset mgr
 			}
 		})
-		time.Sleep(1 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 }
 
-func (me *Mgr) CreateIfNotExistConnection(id string) {
-	_, ok := me.workers.Get(id)
+// makeSureWorker returns existings worker or creates a new worker if id not found
+func (me *Mgr) makeSureWorker(id string) *Worker {
+	wi, ok := me.workers.Get(id)
 	if !ok {
-		me.workers.Set(id, NewWorker(id, me.deadChan))
+		w := NewWorker(id, me.deadChan)
+		me.workers.Set(id, w)
+		return w
 	}
+	return wi.(*Worker)
 }
 
 func (me *Mgr) Connect(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
-	wi, ok := me.workers.Get(id)
-	if !ok {
-		return CONNECTIONNOTFOUNDERR
-	}
-	return wi.(*Worker).SetConnection(r, w, intro)
+	return me.makeSureWorker(id).SetConnection(r, w, intro)
 }
 
 func (me *Mgr) Send(id string, offset int64, payload []byte) {
-	wi, ok := me.workers.Get(id)
-	if !ok {
-		return
-	}
-	wi.(*Worker).Send(offset, payload)
+	me.makeSureWorker(id).Send(offset, payload)
 }
 
 func (me *Mgr) Stop() {
@@ -104,8 +99,7 @@ func (me *Mgr) Stop() {
 }
 
 var (
-	PingInterval          = 15 * time.Second
-	OutdateDeadline       = 2 * time.Minute
-	DeadDeadline          = 2 * time.Minute
-	CONNECTIONNOTFOUNDERR = errors.New("connection not found")
+	PingInterval    = 15 * time.Second
+	OutdateDeadline = 2 * time.Minute
+	DeadDeadline    = 2 * time.Minute
 )

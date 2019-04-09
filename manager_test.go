@@ -25,7 +25,6 @@ func TestClosed(t *testing.T) {
 			mgr.Send(id, int64(i), []byte(fmt.Sprintf("hello-%d", i)))
 		}
 	}()
-	mgr.CreateIfNotExistConnection(id)
 	origin := "http://localhost/"
 	url := "ws://localhost:8081"
 
@@ -82,7 +81,6 @@ func TestNormal(t *testing.T) {
 	mgr = NewManager(deadChan, commitChan)
 	for i := 0; i < 10; i++ {
 		id := toWsId(i)
-		mgr.CreateIfNotExistConnection(toWsId(i))
 		go func(id string) {
 			url, origin := "ws://localhost:8081", "http://localhost/"
 			ws, err := websocket.Dial(url+"?connection_id="+id, "", origin)
