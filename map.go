@@ -16,11 +16,17 @@ type Map struct {
 
 	// maximum item can keep
 	size int64
+
+	exeGroup *executor.ExecutorGroup
 }
 
 // NewMap creates a new Map object
 func NewMap() Map {
-	return Map{RWMutex: &sync.RWMutex{}, m: make(map[string]interface{}, 1000)}
+	return Map{
+		RWMutex: &sync.RWMutex{},
+		m: make(map[string]interface{}, 1000),
+		exeGroup: executor.NewExecutorGroup(1000),
+	}
 }
 
 // Get lookups a value by key, return pair (nil, false) if not found
@@ -48,16 +54,17 @@ func (me *Map) Delete(key string) {
 // Scan loops through all workers parallelly without creating race condition
 // on the map
 func (me *Map) Scan(f func(key string, value interface{})) {
-	exe := executor.New(100, 3, f)
+	gr := me.exeGroup.NewGroup(f)
 
 	me.RLock()
 	for k, v := range me.m {
 		me.RUnlock()
-		exe.Add(k, v)
+		gr.Add(k, v)
 		me.RLock()
 	}
 	me.RUnlock()
-	exe.Wait()
+	gr.Wait()
+	gr.Delete()
 }
 
 // GetOrCreate returns the matched value by key or insert a value returned
