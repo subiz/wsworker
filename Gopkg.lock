@@ -2,6 +2,30 @@
 
 
 [[projects]]
+  digest = "1:33082c63746b464db3d1c2c07a1396d860484d97fe857ef9e8668a9b406db09f"
+  name = "github.com/go-redis/redis"
+  packages = [
+    ".",
+    "internal",
+    "internal/consistenthash",
+    "internal/hashtag",
+    "internal/pool",
+    "internal/proto",
+    "internal/util",
+  ]
+  pruneopts = "UT"
+  revision = "d22fde8721cc915a55aeb6b00944a76a92bfeb6e"
+  version = "v6.15.2"
+
+[[projects]]
+  digest = "1:318f1c959a8a740366fce4b1e1eb2fd914036b4af58fbd0a003349b305f118ad"
+  name = "github.com/golang/protobuf"
+  packages = ["proto"]
+  pruneopts = "UT"
+  revision = "b5d812f8a3706043e23a9cd5babf2e5423744d30"
+  version = "v1.3.1"
+
+[[projects]]
   digest = "1:7b5c6e2eeaa9ae5907c391a91c132abfd5c9e8a784a341b5625e750c67e6825d"
   name = "github.com/gorilla/websocket"
   packages = ["."]
@@ -19,6 +43,14 @@
 
 [[projects]]
   branch = "master"
+  digest = "1:0f9b3b3f15e543521ef8aa1dd03acd81429dde7ef4063ca7da93b1a59f3d8680"
+  name = "github.com/subiz/goredis"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "5b13aa98ebdde201115e30aaccd6714afea8c48a"
+
+[[projects]]
+  branch = "master"
   digest = "1:7427036b6d926b3d1fa0773771820735b35554a98296f1074df440ee30a97296"
   name = "golang.org/x/net"
   packages = ["websocket"]
@@ -31,6 +63,7 @@
   input-imports = [
     "github.com/gorilla/websocket",
     "github.com/subiz/executor",
+    "github.com/subiz/goredis",
     "golang.org/x/net/websocket",
   ]
   solver-name = "gps-cdcl"
