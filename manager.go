@@ -12,44 +12,23 @@ type Mgr struct {
 
 	stopped bool
 
+	deadWorkers *Cache
 	// a channel of worker's ID, used notify the manager that the worker is dead
 	deadChan   chan<- string
 	commitChan chan<- int64
 }
 
 // NewManager creates a new Mgr object
-func NewManager(deadChan chan<- string, commitChan chan<- int64) *Mgr {
+func NewManager(redisHosts []string, redisPw string, deadChan chan<- string, commitChan chan<- int64) *Mgr {
 	m := &Mgr{workers: NewMap(), deadChan: deadChan, commitChan: commitChan}
+	deadWorkers, err := NewCache(redisHosts, redisPw, 100000)
+	if err != nil {
+		panic(err)
+	}
+	m.deadWorkers = deadWorkers
 	go m.doCommit()
-	go m.cleanDeadWorkers()
 	go m.doPing()
 	return m
-}
-
-// cleanDeadWorker runs a loop which removes dead workers
-func (me *Mgr) cleanDeadWorkers() {
-	// holds dead workers
-	deadWorkers := make(map[string]int64)
-
-	for !me.stopped {
-		now := time.Now().Unix()
-		me.workers.Scan(func(id string, w interface{}) {
-			exp_sec := deadWorkers[id]
-			if exp_sec == 0 {
-				if w.(*Worker).GetState() == DEAD {
-					deadWorkers[id] = now + 3600 //
-					me.deadChan <- id
-				}
-				return
-			}
-
-			if exp_sec < now { // clear the dead worker after 1 hour
-				me.workers.Delete(id)
-				delete(deadWorkers, id)
-			}
-		})
-		time.Sleep(30 * time.Minute)
-	}
 }
 
 // checkPing runs ping check loop
@@ -64,7 +43,13 @@ func (me *Mgr) doPing() {
 func (me *Mgr) doCommit() {
 	for !me.stopped {
 		me.workers.Scan(func(id string, w interface{}) {
-			for _, offset := range w.(*Worker).Commit() {
+			offsets, err := w.(*Worker).Commit()
+			if err == DEADERR {
+				me.deadChan <- id
+				me.deadWorkers.Set(id, []byte("OK"))
+				return
+			}
+			for _, offset := range offsets {
 				me.commitChan <- offset
 			}
 		})
@@ -73,26 +58,44 @@ func (me *Mgr) doCommit() {
 }
 
 func (me *Mgr) Connect(r *http.Request, w http.ResponseWriter, id string, intro []byte) error {
+	_, has, err := me.deadWorkers.Get(id)
+	if err != nil {
+		return err
+	}
+
+	if has {
+		return DEADERR
+	}
+
 	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id) }).(*Worker)
-	return worker.Connect(r, w, intro)
+	return worker.Attach(r, w, intro)
 }
 
-func (me *Mgr) Send(id string, offset int64, payload []byte) {
+func (me *Mgr) Send(id string, offset int64, payload []byte) error {
+	_, has, err := me.deadWorkers.Get(id)
+	if err != nil {
+		return err
+	}
+
+	if has {
+		me.commitChan <- offset
+		return DEADERR
+	}
+
 	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id) }).(*Worker)
 	if err := worker.Send(offset, payload); err == DEADERR {
 		// the worker is dead and unable to handle the message
 		// we ignores the message by committing it
 		me.commitChan <- offset
 	}
+	return nil
 }
 
 func (me *Mgr) Stop() {
 	me.stopped = true
-	me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).Halt() })
+	me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).Stop() })
 }
 
 var (
 	PingInterval    = 15 * time.Second
-	OutdateDeadline = 2 * time.Minute
-	DeadDeadline    = 2 * time.Minute
 )
