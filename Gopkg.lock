@@ -35,11 +35,11 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:1133487a3831caf87d009aa1f102d8ca75a99c3e31051a5a6fd66632829b3488"
+  digest = "1:cc62bfe1dc7875ce4d8486d0cfe3735c60f937346941835f5361e8422c2fc772"
   name = "github.com/subiz/executor"
   packages = ["."]
   pruneopts = "UT"
-  revision = "f6c88eb64cf19dd3f9e58cd08037b22e8c51f3bc"
+  revision = "51801ade376cfba45d9c911b67d39043d40e675f"
 
 [[projects]]
   branch = "master"
