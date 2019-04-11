@@ -13,6 +13,9 @@ type Map struct {
 
 	// holds map's keys and values
 	m map[string]interface{}
+
+	// maximum item can keep
+	size int64
 }
 
 // NewMap creates a new Map object

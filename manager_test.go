@@ -15,7 +15,7 @@ import (
 func TestClosed(t *testing.T) {
 	deadChan := make(chan string, 1000)
 	commitChan := make(chan int64, 1000)
-	mgr = NewManager(deadChan, commitChan)
+	mgr = NewManager([]string{"localhost:6379"}, "", deadChan, commitChan)
 
 	id := toWsId(0)
 
@@ -78,7 +78,7 @@ var mgr *Mgr
 func TestNormal(t *testing.T) {
 	deadChan := make(chan string, 1000)
 	commitChan := make(chan int64, 1000)
-	mgr = NewManager(deadChan, commitChan)
+	mgr = NewManager([]string{"localhost:6379"}, "", deadChan, commitChan)
 	for i := 0; i < 10; i++ {
 		id := toWsId(i)
 		go func(id string) {

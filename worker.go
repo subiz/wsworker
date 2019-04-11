@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-var (
-	DEAD    = "dead"
-	NORMAL  = "normal"
-	DEADERR = errors.New("dead")
-)
-
 type Ws interface {
 	Close() error
 	Recv() ([]byte, error)
@@ -67,14 +61,16 @@ func NewWorker(id string) *Worker {
 	}
 }
 
-// Halt forces worker to switch to DEAD mode
-func (w *Worker) Halt() {
+// Stop forces worker to switch to DEAD mode
+func (w *Worker) Stop() {
 	w.Lock()
 	defer w.Unlock()
 	w.toDead()
 }
 
-func (me *Worker) Connect(r *http.Request, w http.ResponseWriter, intro []byte) error {
+// Attach attachs a websocket connection to the worker
+// intro: the very first payload to send to client
+func (me *Worker) Attach(r *http.Request, w http.ResponseWriter, intro []byte) error {
 	me.Lock()
 	defer me.Unlock()
 
@@ -96,7 +92,7 @@ func (me *Worker) Connect(r *http.Request, w http.ResponseWriter, intro []byte) 
 		}
 	}
 
-	// replay old messages
+	// re-stream uncommitted messages to new connection
 	for _, msg := range me.buffer {
 		if err := me.ws.Send(msg.payload); err != nil {
 			log.Printf("[wsworker: %s] on send error %v", me.Id, err)
@@ -105,21 +101,23 @@ func (me *Worker) Connect(r *http.Request, w http.ResponseWriter, intro []byte) 
 		}
 	}
 
+	// start the receive loop
+	current_ws := me.ws
 	go func() {
 		me.Lock()
-		// locked region
-		defer me.Unlock()
-		ws := me.ws
-		for me.state == NORMAL && ws != nil {
-			me.Unlock() // end locked region
-			p, err := ws.Recv()
-			me.Lock()        // start locked region
-			if me.ws != ws { // worker has detached this connection
+		// keep receive until current connection is detached
+		for me.state == NORMAL && me.ws == current_ws && current_ws != nil {
+			me.Unlock()
+			p, err := current_ws.Recv()
+			me.Lock()
+			if me.ws != current_ws { // worker has detached this connection
+				me.Unlock()
 				return
 			}
 			if err != nil {
 				log.Printf("[wsworker: %s] to error, normal recv %v", me.Id, err)
 				me.detachConnection()
+				me.Unlock()
 				return
 			}
 			offset, _ := strconv.ParseInt(string(p), 10, 0)
@@ -128,6 +126,7 @@ func (me *Worker) Connect(r *http.Request, w http.ResponseWriter, intro []byte) 
 			}
 			me.latest_committed_offset = offset
 		}
+		me.Unlock()
 	}()
 	return nil
 }
@@ -167,31 +166,37 @@ func (me *Worker) Ping() {
 	me.Lock()
 	defer me.Unlock()
 
-	switch me.state {
-	case DEAD:
+	if me.state == DEAD {
 		return
-	case NORMAL:
-		if me.ws == nil { // worker is detached from the connection
-			now := time.Now().Unix() // second
-			if now-me.detached < me.closeDeadline {
-				return
-			}
-			log.Printf("[wsworker: %s] dead by close check", me.Id)
-			me.toDead()
+	}
+
+	if me.ws == nil {
+		// kill the worker if it has been dettached for too long
+		now := time.Now().Unix() // second
+		if now-me.detached < me.closeDeadline {
 			return
 		}
-		if err := me.ws.Ping(); err != nil {
-			log.Printf("[wsworker: %s] ping err %v", me.Id, err)
-			me.detachConnection()
-			return
-		}
+		me.toDead()
+		return
+	}
+
+	if err := me.ws.Ping(); err != nil {
+		// client has gone away or there is something wrong with the websocket connection
+		// we must dettach the current one
+		log.Printf("[wsworker: %s] ping err %v", me.Id, err)
+		me.detachConnection()
+		return
 	}
 }
 
 // Commit returns commited offsets
-func (me *Worker) Commit() []int64 {
+func (me *Worker) Commit() ([]int64, error) {
 	me.Lock()
 	defer me.Unlock()
+
+	if me.state == DEAD {
+		return nil, DEADERR
+	}
 
 	var committed_offsets []int64
 	for i := range me.buffer {
@@ -205,7 +210,7 @@ func (me *Worker) Commit() []int64 {
 		}
 
 		if len(me.buffer) > 0 {
-			// kills worker if client don't commit in time
+			// kill the worker if client don't commit in time
 			firstmsg := me.buffer[0]
 			timesincefirstsent := time.Now().Unix() - firstmsg.sent // second
 			if timesincefirstsent > me.commitDeadline {
@@ -213,10 +218,10 @@ func (me *Worker) Commit() []int64 {
 				me.toDead()
 			}
 		}
-		return committed_offsets
+		return committed_offsets, nil
 	}
 	me.buffer = nil
-	return committed_offsets
+	return committed_offsets, nil
 }
 
 // Send delivers a message to the client
@@ -246,9 +251,13 @@ func (me *Worker) Send(offset int64, payload []byte) error {
 	return nil
 }
 
-// GetState returns current state of the worker, could be "dead", "normal" or "closed"
-func (me *Worker) GetState() string {
-	me.Lock()
-	defer me.Unlock()
-	return me.state
-}
+var (
+	DEAD    = "dead"
+	NORMAL  = "normal"
+	DEADERR = errors.New("dead")
+)
+
+const (
+	OutdateDeadline = 2 * time.Minute
+	DeadDeadline    = 2 * time.Minute
+)

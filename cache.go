@@ -7,14 +7,6 @@ import (
 	"time"
 )
 
-// cacheItem represences an item inside the cache
-type cacheItem struct {
-	// tells whether the item is existed
-	existed bool
-
-	value []byte
-}
-
 // Cache is a simple LRU cache based on golang map and backed by redis
 type Cache struct {
 	*sync.Mutex
@@ -33,6 +25,14 @@ type Cache struct {
 
 	// used to communicate with a redis cluster
 	rclient *goredis.Client
+}
+
+// cacheItem represences an item inside the cache
+type cacheItem struct {
+	// tells whether the item is existed
+	existed bool
+
+	value []byte
 }
 
 // NewMap creates a new Map object
