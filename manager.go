@@ -21,7 +21,7 @@ type Mgr struct {
 // NewManager creates a new Mgr object
 func NewManager(redisHosts []string, redisPw string, deadChan chan<- string, commitChan chan<- int64) *Mgr {
 	m := &Mgr{workers: NewMap(), deadChan: deadChan, commitChan: commitChan}
-	deadWorkers, err := NewCache(redisHosts, redisPw, 100000)
+	deadWorkers, err := NewCache(redisHosts, redisPw, "deadWs24", 100000)
 	if err != nil {
 		panic(err)
 	}

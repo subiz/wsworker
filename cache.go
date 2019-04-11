@@ -25,6 +25,9 @@ type Cache struct {
 
 	// used to communicate with a redis cluster
 	rclient *goredis.Client
+
+	// a string appended to every redis key to avoid key collision
+	redisPrefix string
 }
 
 // cacheItem represences an item inside the cache
@@ -36,15 +39,16 @@ type cacheItem struct {
 }
 
 // NewMap creates a new Map object
-func NewCache(redis_hosts []string, password string, cap int) (*Cache, error) {
+func NewCache(redis_hosts []string, redis_pw, redis_prefix string, cap int) (*Cache, error) {
 	me := &Cache{
 		Mutex:       &sync.Mutex{},
 		m:           make(map[string]cacheItem, cap),
 		cap:         cap,
 		createdRing: ring.New(cap),
+		redisPrefix: redis_prefix,
 	}
 
-	rclient, err := goredis.New(redis_hosts, password)
+	rclient, err := goredis.New(redis_hosts, redis_pw)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +67,7 @@ func (me *Cache) Get(key string) ([]byte, bool, error) {
 	}
 
 	// local cache miss, lookup in redis
-	value, has, err := me.rclient.Get(key, key) // may block
+	value, has, err := me.rclient.Get(me.redisPrefix+key, me.redisPrefix+key) // may block
 	if err != nil {
 		return nil, false, err
 	}
@@ -96,7 +100,7 @@ func (me *Cache) Set(key string, value []byte) error {
 	me.m[key] = cacheItem{value: value, existed: true}
 
 	// reset to redis
-	err := me.rclient.Set(key, key, value, 24*time.Hour) // may block
+	err := me.rclient.Set(me.redisPrefix+key, me.redisPrefix+key, value, 24*time.Hour) // may block
 	me.Unlock()
 	return err
 }
