@@ -47,6 +47,7 @@ func (me *Mgr) doCommit() {
 			if err == DEADERR {
 				me.deadChan <- id
 				me.deadWorkers.Set(id, []byte("OK"))
+				me.workers.Delete(id)
 				return
 			}
 			for _, offset := range offsets {
