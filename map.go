@@ -17,7 +17,7 @@ type Map struct {
 	// maximum item can keep
 	size int64
 
-	exeGroup *executor.ExecutorGroup
+	exe *executor.GroupMgr
 }
 
 // NewMap creates a new Map object
@@ -25,7 +25,7 @@ func NewMap() Map {
 	return Map{
 		RWMutex: &sync.RWMutex{},
 		m: make(map[string]interface{}, 1000),
-		exeGroup: executor.NewExecutorGroup(1000),
+		exe: executor.NewGroupMgr(1000),
 	}
 }
 
@@ -54,8 +54,7 @@ func (me *Map) Delete(key string) {
 // Scan loops through all workers parallelly without creating race condition
 // on the map
 func (me *Map) Scan(f func(key string, value interface{})) {
-	gr := me.exeGroup.NewGroup(f)
-
+	gr := me.exe.NewGroup(f)
 	me.RLock()
 	for k, v := range me.m {
 		me.RUnlock()
@@ -64,7 +63,6 @@ func (me *Map) Scan(f func(key string, value interface{})) {
 	}
 	me.RUnlock()
 	gr.Wait()
-	gr.Delete()
 }
 
 // GetOrCreate returns the matched value by key or insert a value returned
