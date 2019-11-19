@@ -37,7 +37,6 @@ func (me *Mgr) doPing() {
 			err := w.(*Worker).Ping()
 			if err != DEADERR {
 				return
-
 			}
 			// dead
 			me.deadChan <- id
@@ -79,11 +78,7 @@ func (me *Mgr) Send(id string, offset int64, payload []byte) error {
 	}
 
 	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id, me.commitChan) }).(*Worker)
-	if err := worker.Send(offset, payload); err == DEADERR {
-		// the worker is dead and unable to handle the message
-		// we ignores the message by committing it
-		me.commitChan <- offset
-	}
+	worker.Send(offset, payload)
 	return nil
 }
 

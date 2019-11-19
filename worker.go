@@ -65,36 +65,74 @@ func NewWorker(id string, commitChan chan<- int64) *Worker {
 		closeDeadline:  int64(DeadDeadline.Seconds()),
 		commitDeadline: int64(OutdateDeadline.Seconds()),
 		buffer:         make([]message, 0, 32),
-		sendqueue:      make(chan []byte, BUFFER),
+		sendqueue:      make(chan []byte, BUFFER+10),
 	}
 
-	go w.sendLoop()
 	return w
 }
 
-func (w *Worker) sendLoop() {
-	for {
-		if w.state == DEAD {
+func (w *Worker) receiveLoop(currentWs Ws) {
+	w.Lock()
+	// keep receive until current connection is detached
+	for w.state == NORMAL && w.ws == currentWs && currentWs != nil {
+		w.Unlock()
+		p, err := currentWs.Recv()
+		w.Lock()
+		if w.ws != currentWs { // worker has detached this connection
+			w.Unlock()
 			return
 		}
 
-		for payload := range w.sendqueue {
-			w.Lock()
-			current_ws := w.ws
+		if err != nil {
+			log.Printf("[wsworker: %s] to error, normal recv %v", w.Id, err)
+			w.detachConnection()
 			w.Unlock()
-			if err := w.ws.Send(payload); err != nil {
-				log.Printf("[wsworker: %s] on send error %v", w.Id, err)
-				w.Lock()
-				if current_ws != w.ws {
-					w.Unlock()
-					break
-				}
-
-				// if still is my
-				w.detachConnection()
-				w.Unlock()
-			}
+			return
 		}
+		offset, _ := strconv.ParseInt(string(p), 10, 0)
+		if offset < w.latest_committed_offset { // ignore invalid offset
+			continue
+		}
+		w.latest_committed_offset = offset
+		w.doCommit()
+	}
+	w.Unlock()
+}
+
+func (w *Worker) sendLoop(sendqueue chan []byte) {
+	for payload := range sendqueue {
+		if payload == nil { // exit signal
+			return
+		}
+
+		w.Lock()
+		currentWs := w.ws
+		if currentWs == nil {
+			w.Unlock()
+			continue
+		}
+		w.Unlock()
+
+		err := currentWs.Send(payload)
+
+		w.Lock()
+		if currentWs != w.ws { // world is changed, new connection is attached
+			// clean up
+			w.Unlock()
+			return
+		}
+
+		if err == nil {
+			w.Unlock()
+			continue
+		}
+
+		log.Printf("[wsworker: %s] on send error %v", w.Id, err)
+
+		// if still is my
+		w.detachConnection()
+		w.Unlock()
+		return
 	}
 }
 
@@ -103,15 +141,6 @@ func (w *Worker) Stop() {
 	w.Lock()
 	defer w.Unlock()
 	w.toDead()
-}
-
-func (w *Worker) trySend(payload []byte) error {
-	select {
-	case w.sendqueue <- payload:
-		return nil
-	default:
-		return FULLERR
-	}
 }
 
 // Commit returns commited offsets
@@ -164,45 +193,37 @@ func (me *Worker) Attach(r *http.Request, w http.ResponseWriter, intro []byte) e
 
 	me.detachConnection() // detach old connection if exists
 	me.ws = ws
-	if intro != nil {
-		me.trySend(intro)
-	}
+	me.sendqueue = make(chan []byte, BUFFER+10)
+	go me.sendLoop(me.sendqueue) // start send loop
+	go me.receiveLoop(ws)
 
+	// can't be blocked since sendqueue has way more free space for me.buffer
+	if intro != nil {
+		me.sendqueue <- intro // could panic
+	}
 	// re-stream uncommitted messages to new connection
 	for _, msg := range me.buffer {
-		me.trySend(msg.payload)
+		me.sendqueue <- msg.payload
 	}
-
-	// start the receive loop
-	current_ws := me.ws
-	go func() {
-		me.Lock()
-		// keep receive until current connection is detached
-		for me.state == NORMAL && me.ws == current_ws && current_ws != nil {
-			me.Unlock()
-			p, err := current_ws.Recv()
-			me.Lock()
-			if me.ws != current_ws { // worker has detached this connection
-				me.Unlock()
-				return
-			}
-
-			if err != nil {
-				log.Printf("[wsworker: %s] to error, normal recv %v", me.Id, err)
-				me.detachConnection()
-				me.Unlock()
-				return
-			}
-			offset, _ := strconv.ParseInt(string(p), 10, 0)
-			if offset < me.latest_committed_offset { // ignore invalid offset
-				continue
-			}
-			me.latest_committed_offset = offset
-			me.doCommit()
-		}
-		me.Unlock()
-	}()
 	return nil
+}
+
+func flush(sendqueue chan []byte) {
+	out := false
+	for {
+		select {
+		case <-sendqueue:
+		default:
+			out = true
+		}
+		if out {
+			break
+		}
+	}
+	if sendqueue == nil {
+		return
+	}
+	sendqueue <- nil // send end signal
 }
 
 // toDead switchs worker to DEAD mode, release all holding resources
@@ -223,8 +244,9 @@ func (me *Worker) toDead() {
 		}
 	}
 	me.buffer = nil
-	close(me.sendqueue)
-	me.sendqueue = nil
+	me.ws = nil
+	flush(me.sendqueue)
+	log.Printf("[wsworker: %s] onDead22", me.Id)
 }
 
 // detachConnection closes the current websocket connection and remove it
@@ -234,11 +256,10 @@ func (me *Worker) detachConnection() {
 	if me.ws == nil {
 		return
 	}
-	close(me.sendqueue)
-	me.sendqueue = make(chan []byte, BUFFER)
 	me.ws.Close()
 	me.detached = time.Now().Unix()
-	me.ws = nil
+	flush(me.sendqueue)
+	me.ws = nil // will flush sendqueue
 }
 
 // Ping delivers a ping message to the client
@@ -264,21 +285,26 @@ func (me *Worker) Ping() error {
 	if err := me.ws.Ping(); err != nil {
 		// client has gone away or there is something wrong with the websocket connection
 		// we must dettach the current one
-		log.Printf("[wsworker: %s] ping err %v", me.Id, err)
 		me.detachConnection()
-		return nil
 	}
 	return nil
 }
 
 // Send delivers a message to the client
 // ignore the request if the worker is DEAD
-func (me *Worker) Send(offset int64, payload []byte) error {
+func (me *Worker) Send(offset int64, payload []byte) {
 	me.Lock()
 	defer me.Unlock()
 
+	// ignore invalid payload
+	if payload == nil {
+		me.commitChan <- offset
+		return
+	}
+
 	if me.state == DEAD {
-		return DEADERR
+		me.commitChan <- offset
+		return
 	}
 	now := time.Now().Unix()
 
@@ -287,13 +313,12 @@ func (me *Worker) Send(offset int64, payload []byte) error {
 	if len(me.buffer) > BUFFER {
 		log.Printf("[wsworker: %s] dead by buffer overflow", me.Id)
 		me.toDead()
-		return DEADERR
+		return
 	}
 
-	if me.state == NORMAL && me.ws != nil {
-		me.trySend(payload)
+	if me.ws != nil {
+		me.sendqueue <- payload
 	}
-	return nil
 }
 
 var (
