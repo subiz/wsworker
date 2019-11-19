@@ -26,7 +26,6 @@ func NewManager(redisHosts []string, redisPw string, deadChan chan<- string, com
 		panic(err)
 	}
 	m.deadWorkers = deadWorkers
-	go m.doCommit()
 	go m.doPing()
 	return m
 }
@@ -34,27 +33,18 @@ func NewManager(redisHosts []string, redisPw string, deadChan chan<- string, com
 // checkPing runs ping check loop
 func (me *Mgr) doPing() {
 	for !me.stopped {
-		me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).Ping() })
-		time.Sleep(PingInterval)
-	}
-}
-
-// doCommit runs a loop which call CommitCheck on every worker
-func (me *Mgr) doCommit() {
-	for !me.stopped {
 		me.workers.Scan(func(id string, w interface{}) {
-			offsets, err := w.(*Worker).Commit()
-			if err == DEADERR {
-				me.deadChan <- id
-				me.deadWorkers.Set(id, []byte("OK"))
-				me.workers.Delete(id)
+			err := w.(*Worker).Ping()
+			if err != DEADERR {
 				return
+
 			}
-			for _, offset := range offsets {
-				me.commitChan <- offset
-			}
+			// dead
+			me.deadChan <- id
+			me.deadWorkers.Set(id, []byte("OK"))
+			me.workers.Delete(id)
 		})
-		time.Sleep(5 * time.Second)
+		time.Sleep(15 * time.Second)
 	}
 }
 
@@ -68,13 +58,18 @@ func (me *Mgr) Connect(r *http.Request, w http.ResponseWriter, id string, intro 
 		return DEADERR
 	}
 
-	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id) }).(*Worker)
+	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id, me.commitChan) }).(*Worker)
 	return worker.Attach(r, w, intro)
 }
 
 func (me *Mgr) Send(id string, offset int64, payload []byte) error {
+	if id == "" {
+		me.commitChan <- offset
+		return EMPTYCONNECTIONERR
+	}
 	_, has, err := me.deadWorkers.Get(id)
 	if err != nil {
+		me.commitChan <- offset
 		return err
 	}
 
@@ -83,7 +78,7 @@ func (me *Mgr) Send(id string, offset int64, payload []byte) error {
 		return DEADERR
 	}
 
-	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id) }).(*Worker)
+	worker := me.workers.GetOrCreate(id, func() interface{} { return NewWorker(id, me.commitChan) }).(*Worker)
 	if err := worker.Send(offset, payload); err == DEADERR {
 		// the worker is dead and unable to handle the message
 		// we ignores the message by committing it
@@ -96,7 +91,3 @@ func (me *Mgr) Stop() {
 	me.stopped = true
 	me.workers.Scan(func(_ string, w interface{}) { w.(*Worker).Stop() })
 }
-
-var (
-	PingInterval    = 15 * time.Second
-)

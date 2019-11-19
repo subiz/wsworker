@@ -10,7 +10,7 @@ import (
 
 func TestCacheGet(t *testing.T) {
 	now := fmt.Sprintf("%d", time.Now().UnixNano())
-	cache, err := NewCache([]string{"localhost:6379"}, "", now, 2)
+	cache, err := NewCache([]string{"dev.subiz.net:6379"}, "", now, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestCacheGet(t *testing.T) {
 
 func TestCacheSet(t *testing.T) {
 	now := fmt.Sprintf("%d", time.Now().UnixNano())
-	cache, err := NewCache([]string{"localhost:6379"}, "", now, 2)
+	cache, err := NewCache([]string{"dev.subiz.net:6379"}, "", now, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
