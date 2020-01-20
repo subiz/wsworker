@@ -42,8 +42,6 @@ type Worker struct {
 
 	buffer []message
 
-	sendqueue chan []byte
-
 	commitChan chan<- int64
 }
 
@@ -68,6 +66,11 @@ func (w *Worker) receiveLoop(ws Ws) {
 		w.Unlock()
 		p, err := ws.Recv()
 		w.Lock()
+
+		if ws.IsClosed() {
+			return
+		}
+
 		if err != nil {
 			log.Printf("[wsworker: %s] to error, normal recv %v", w.Id, err)
 			w.detachConnection()
@@ -84,24 +87,6 @@ func (w *Worker) receiveLoop(ws Ws) {
 	w.Unlock()
 }
 
-func (w *Worker) sendLoop(sendqueue chan []byte, ws Ws) {
-	for payload := range sendqueue {
-		if payload == nil { // exit signal
-			return
-		}
-
-		if err := ws.Send(payload); err != nil {
-			log.Printf("[wsworker: %s] on send error %v", w.Id, err)
-			w.Lock()
-
-
-			w.detachConnection()
-			w.Unlock()
-			return
-		}
-	}
-}
-
 // Stop forces worker to switch to DEAD mode
 func (w *Worker) Stop() {
 	w.Lock()
@@ -111,24 +96,19 @@ func (w *Worker) Stop() {
 
 // Commit returns commited offsets
 func (me *Worker) doCommit() {
-	var committed_offsets []int64
-	var lastCommitedOffset int
+	var firstUncommitedOffset int
 	for i := range me.buffer {
 		if me.buffer[i].offset <= me.latest_committed_offset {
-			committed_offsets = append(committed_offsets, me.buffer[i].offset)
+			firstUncommitedOffset = i + 1
+			me.commitChan <- me.buffer[i].offset
 			continue
 		}
 		break
 	}
 
-	if len(committed_offsets) == 0 {
-		return
-	}
-
-	// now, i is the last committed message
-	me.buffer = me.buffer[len(committed_offsets):]
-	for _, offset := range committed_offsets {
-		me.commitChan <- offset
+	// remove committed offsets in buffer
+	if firstUncommitedOffset > 0 {
+		me.buffer = me.buffer[firstUncommitedOffset:]
 	}
 }
 
@@ -149,32 +129,17 @@ func (me *Worker) Attach(r *http.Request, w http.ResponseWriter, intro []byte) e
 
 	me.detachConnection() // detach old connection if exists
 	me.ws = ws
-
-	// make sure to clean last resource
-	safeClose(me.sendqueue)
-
-	sendqueue := make(chan []byte, BUFFER+10)
-	go me.sendLoop(sendqueue, ws) // start send loop
 	go me.receiveLoop(ws)
 
 	// can't be blocked since sendqueue has way more free space for me.buffer
 	if intro != nil {
-		sendqueue <- intro // could panic
+		ws.Send(intro)
 	}
 	// re-stream uncommitted messages to new connection
 	for _, msg := range me.buffer {
-		sendqueue <- msg.payload
+		ws.Send(msg.payload)
 	}
-	me.sendqueue = sendqueue
 	return nil
-}
-
-func safeClose(ch chan []byte) {
-	defer func() {
-		recover()
-	}()
-
-	close(ch)
 }
 
 // toDead switchs worker to DEAD mode, release all holding resources
@@ -201,14 +166,12 @@ func (me *Worker) toDead(reason string) {
 // detachConnection closes the current websocket connection and remove it
 // out of worker
 // Note: this function is not thread safe, caller should lock the worker before use
-func (me *Worker) detachConnection(ws Ws) {
-	if ws == nil {
+func (me *Worker) detachConnection() {
+	if me.ws == nil {
 		return
 	}
-	ws.Close()
+	me.ws.Close()
 	me.detached = time.Now().Unix()
-	safeClose(me.sendqueue)
-	me.sendqueue = nil
 	me.ws = nil
 }
 
@@ -274,10 +237,7 @@ func (me *Worker) Send(offset int64, payload []byte) {
 		me.toDead("overflow")
 		return
 	}
-
-	if me.ws != nil {
-		me.sendqueue <- payload
-	}
+	me.ws.Send(payload)
 }
 
 var (
