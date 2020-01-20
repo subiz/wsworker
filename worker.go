@@ -11,10 +11,11 @@ import (
 )
 
 type Ws interface {
+	IsClosed() bool
 	Close() error
 	Recv() ([]byte, error)
 	Ping() error
-	Send(data []byte) error // do not panic
+	Send(data []byte) error // do not panic //TODO: send to queue
 }
 
 type message struct {
@@ -39,12 +40,6 @@ type Worker struct {
 	// holds the current mode of the worker, could be NORMAL, CLOSED, DEAD, ...
 	state string
 
-	// number of second that worker must commit when receive send
-	// or it will be killed
-	commitDeadline int64
-
-	closeDeadline int64
-
 	buffer []message
 
 	sendqueue chan []byte
@@ -52,37 +47,27 @@ type Worker struct {
 	commitChan chan<- int64
 }
 
-const BUFFER = 200
-
 // NewWorker creates a new Worker object
 func NewWorker(id string, commitChan chan<- int64) *Worker {
 	w := &Worker{
-		Mutex:          &sync.Mutex{},
-		commitChan:     commitChan,
-		Id:             id,
-		state:          NORMAL,
-		detached:       time.Now().Unix(),
-		closeDeadline:  int64(DeadDeadline.Seconds()),
-		commitDeadline: int64(OutdateDeadline.Seconds()),
-		buffer:         make([]message, 0, 32),
-		sendqueue:      make(chan []byte, BUFFER+10),
+		Mutex:      &sync.Mutex{},
+		commitChan: commitChan,
+		Id:         id,
+		state:      NORMAL,
+		detached:   time.Now().Unix(),
+		buffer:     make([]message, 0, BUFFER),
 	}
 
 	return w
 }
 
-func (w *Worker) receiveLoop(currentWs Ws) {
+func (w *Worker) receiveLoop(ws Ws) {
 	w.Lock()
 	// keep receive until current connection is detached
-	for w.state == NORMAL && w.ws == currentWs && currentWs != nil {
+	for w.state == NORMAL && !ws.IsClosed() {
 		w.Unlock()
-		p, err := currentWs.Recv()
+		p, err := ws.Recv()
 		w.Lock()
-		if w.ws != currentWs { // worker has detached this connection
-			w.Unlock()
-			return
-		}
-
 		if err != nil {
 			log.Printf("[wsworker: %s] to error, normal recv %v", w.Id, err)
 			w.detachConnection()
@@ -99,40 +84,21 @@ func (w *Worker) receiveLoop(currentWs Ws) {
 	w.Unlock()
 }
 
-func (w *Worker) sendLoop(sendqueue chan []byte) {
+func (w *Worker) sendLoop(sendqueue chan []byte, ws Ws) {
 	for payload := range sendqueue {
 		if payload == nil { // exit signal
 			return
 		}
 
-		w.Lock()
-		currentWs := w.ws
-		if currentWs == nil {
-			w.Unlock()
-			continue
-		}
-		w.Unlock()
+		if err := ws.Send(payload); err != nil {
+			log.Printf("[wsworker: %s] on send error %v", w.Id, err)
+			w.Lock()
 
-		err := currentWs.Send(payload)
 
-		w.Lock()
-		if currentWs != w.ws { // world is changed, new connection is attached
-			// clean up
+			w.detachConnection()
 			w.Unlock()
 			return
 		}
-
-		if err == nil {
-			w.Unlock()
-			continue
-		}
-
-		log.Printf("[wsworker: %s] on send error %v", w.Id, err)
-
-		// if still is my
-		w.detachConnection()
-		w.Unlock()
-		return
 	}
 }
 
@@ -140,37 +106,27 @@ func (w *Worker) sendLoop(sendqueue chan []byte) {
 func (w *Worker) Stop() {
 	w.Lock()
 	defer w.Unlock()
-	w.toDead()
+	w.toDead("stop")
 }
 
 // Commit returns commited offsets
 func (me *Worker) doCommit() {
 	var committed_offsets []int64
+	var lastCommitedOffset int
 	for i := range me.buffer {
 		if me.buffer[i].offset <= me.latest_committed_offset {
 			committed_offsets = append(committed_offsets, me.buffer[i].offset)
 			continue
 		}
+		break
+	}
 
-		if i > 0 { // me.buffer[0:] is slow (maybe)
-			me.buffer = me.buffer[i:]
-		}
-
-		if len(me.buffer) > 0 {
-			// kill the worker if client don't commit in time
-			firstmsg := me.buffer[0]
-			timesincefirstsent := time.Now().Unix() - firstmsg.sent // second
-			if timesincefirstsent > me.commitDeadline {
-				log.Printf("[wsworker: %s] dead by late commit", me.Id)
-				me.toDead()
-			}
-		}
-		for _, offset := range committed_offsets {
-			me.commitChan <- offset
-		}
+	if len(committed_offsets) == 0 {
 		return
 	}
-	me.buffer = nil
+
+	// now, i is the last committed message
+	me.buffer = me.buffer[len(committed_offsets):]
 	for _, offset := range committed_offsets {
 		me.commitChan <- offset
 	}
@@ -193,47 +149,43 @@ func (me *Worker) Attach(r *http.Request, w http.ResponseWriter, intro []byte) e
 
 	me.detachConnection() // detach old connection if exists
 	me.ws = ws
-	me.sendqueue = make(chan []byte, BUFFER+10)
-	go me.sendLoop(me.sendqueue) // start send loop
+
+	// make sure to clean last resource
+	safeClose(me.sendqueue)
+
+	sendqueue := make(chan []byte, BUFFER+10)
+	go me.sendLoop(sendqueue, ws) // start send loop
 	go me.receiveLoop(ws)
 
 	// can't be blocked since sendqueue has way more free space for me.buffer
 	if intro != nil {
-		me.sendqueue <- intro // could panic
+		sendqueue <- intro // could panic
 	}
 	// re-stream uncommitted messages to new connection
 	for _, msg := range me.buffer {
-		me.sendqueue <- msg.payload
+		sendqueue <- msg.payload
 	}
+	me.sendqueue = sendqueue
 	return nil
 }
 
-func flush(sendqueue chan []byte) {
-	out := false
-	for {
-		select {
-		case <-sendqueue:
-		default:
-			out = true
-		}
-		if out {
-			break
-		}
-	}
-	if sendqueue == nil {
-		return
-	}
-	sendqueue <- nil // send end signal
+func safeClose(ch chan []byte) {
+	defer func() {
+		recover()
+	}()
+
+	close(ch)
 }
 
 // toDead switchs worker to DEAD mode, release all holding resources
 // once worker is dead, it cannot be reused. User should not Send message on dead ws
 // Note: this function is not thread safe, caller should lock the worker before use
-func (me *Worker) toDead() {
+func (me *Worker) toDead(reason string) {
 	if me.state == DEAD {
 		return
 	}
-	log.Printf("[wsworker: %s] onDead", me.Id)
+
+	log.Printf("[wsworker: %s] DEAD cuz %s", me.Id, reason)
 
 	me.state = DEAD
 	me.detachConnection()
@@ -244,27 +196,25 @@ func (me *Worker) toDead() {
 		}
 	}
 	me.buffer = nil
-	me.ws = nil
-	flush(me.sendqueue)
-	log.Printf("[wsworker: %s] onDead22", me.Id)
 }
 
 // detachConnection closes the current websocket connection and remove it
 // out of worker
 // Note: this function is not thread safe, caller should lock the worker before use
-func (me *Worker) detachConnection() {
-	if me.ws == nil {
+func (me *Worker) detachConnection(ws Ws) {
+	if ws == nil {
 		return
 	}
-	me.ws.Close()
+	ws.Close()
 	me.detached = time.Now().Unix()
-	flush(me.sendqueue)
-	me.ws = nil // will flush sendqueue
+	safeClose(me.sendqueue)
+	me.sendqueue = nil
+	me.ws = nil
 }
 
-// Ping delivers a ping message to the client
+// AreYouAlive delivers a ping message to the client
 // returns the current state of the worker
-func (me *Worker) Ping() error {
+func (me *Worker) AreYouAlive() error {
 	me.Lock()
 	defer me.Unlock()
 
@@ -272,14 +222,24 @@ func (me *Worker) Ping() error {
 		return DEADERR
 	}
 
+	// kill the worker if it has been dettached for too long
 	if me.ws == nil {
-		// kill the worker if it has been dettached for too long
 		now := time.Now().Unix() // second
-		if now-me.detached < me.closeDeadline {
+		if now-me.detached < int64(DeadDeadline.Seconds()) {
 			return nil
 		}
-		me.toDead()
+		me.toDead("dettached too long")
 		return DEADERR
+	}
+
+	// kill the worker if client don't commit in time
+	if len(me.buffer) > 0 {
+		firstmsg := me.buffer[0]
+		timesincefirstsent := time.Now().Unix() - firstmsg.sent // second
+		if timesincefirstsent > int64(OutdateDeadline.Seconds()) {
+			me.toDead("late commit")
+			return DEADERR
+		}
 	}
 
 	if err := me.ws.Ping(); err != nil {
@@ -311,8 +271,7 @@ func (me *Worker) Send(offset int64, payload []byte) {
 	var msg = message{offset: offset, payload: payload, sent: now}
 	me.buffer = append(me.buffer, msg)
 	if len(me.buffer) > BUFFER {
-		log.Printf("[wsworker: %s] dead by buffer overflow", me.Id)
-		me.toDead()
+		me.toDead("overflow")
 		return
 	}
 
@@ -322,14 +281,24 @@ func (me *Worker) Send(offset int64, payload []byte) {
 }
 
 var (
-	DEAD               = "dead"
-	NORMAL             = "normal"
 	DEADERR            = errors.New("dead")
 	EMPTYCONNECTIONERR = errors.New("empty_connection")
 	FULLERR            = errors.New("full")
 )
 
 const (
+	DEAD   = "dead"
+	NORMAL = "normal"
+
+	// duration in which worker must received commit message after send a message to client
+	// if commit message come too late, worker will be killed
 	OutdateDeadline = 2 * time.Minute
-	DeadDeadline    = 2 * time.Minute
+
+	// duration in which worker must be reattached after detached
+	// if worker have been detached too long, it will be killed
+	DeadDeadline = 2 * time.Minute
+
+	// maximum number of uncommitted messages
+	// if number of messages execess this, worker will be killed
+	BUFFER = 200
 )
