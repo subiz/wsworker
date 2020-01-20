@@ -4,17 +4,21 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"net/http"
+	"sync"
 	"time"
 )
 
-type Ws struct{ conn *websocket.Conn }
+type Ws struct {
+	mutex *sync.Mutex
+	conn  *websocket.Conn
+}
 
 func NewWs(w http.ResponseWriter, r *http.Request, h http.Header) (*Ws, error) {
 	conn, err := upgrader.Upgrade(w, r, h)
 	if err != nil {
 		return nil, err
 	}
-	return &Ws{conn: conn}, nil
+	return &Ws{mutex: &sync.Mutex{}, conn: conn}, nil
 }
 
 var (
@@ -31,11 +35,17 @@ var (
 	}
 )
 
+func (ws *Ws) IsClosed() bool {
+	return ws.conn != nil
+}
+
 func (ws *Ws) Close() error {
 	if ws == nil {
 		return nil
 	}
-	return ws.conn.Close()
+	err := ws.conn.Close()
+	ws.conn = nil
+	return err
 }
 
 func (ws *Ws) Recv() ([]byte, error) {
@@ -54,6 +64,9 @@ func (ws *Ws) Send(data []byte) (err error) {
 			return
 		}
 	}()
+
+	ws.mutex.Lock()
+	defer ws.mutex.Unlock()
 
 	writer, err := ws.conn.NextWriter(websocket.TextMessage)
 	if err != nil {
